@@ -3,7 +3,7 @@ Results:
   save_dir: "results"
   save_trj: True
   save_trj_kf_intv: 20
-  use_gui: False
+  use_gui: True
   eval_rendering: True
   use_wandb: False
 
@@ -88,5 +88,6 @@ model_params:
   data_device: "cuda"
   
 pipeline_params:
+  depth_ratio: 0.0
   convert_SHs_python: False
   compute_cov3D_python: False

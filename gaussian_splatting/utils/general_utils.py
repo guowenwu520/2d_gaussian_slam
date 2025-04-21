@@ -44,7 +44,10 @@ def get_expon_lr_func(
     :return HoF which takes step as input
     """
 
-    def helper(step):
+    return helper
+def helper(
+    step, lr_init, lr_final, lr_delay_steps=0, lr_delay_mult=1.0, max_steps=1000000
+):
         if step < 0 or (lr_init == 0.0 and lr_final == 0.0):
             # Disable this parameter
             return 0.0
@@ -58,9 +61,6 @@ def get_expon_lr_func(
         t = np.clip(step / max_steps, 0, 1)
         log_lerp = np.exp(np.log(lr_init) * (1 - t) + np.log(lr_final) * t)
         return delay_rate * log_lerp
-
-    return helper
-
 def strip_lowerdiag(L):
     uncertainty = torch.zeros((L.shape[0], 6), dtype=torch.float, device="cuda")
 

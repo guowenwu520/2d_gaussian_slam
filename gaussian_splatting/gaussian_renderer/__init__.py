@@ -94,7 +94,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     else:
         colors_precomp = override_color
     
-    rendered_image, radii, allmap = rasterizer(
+    rendered_image, radii, allmap, n_touched = rasterizer(
         means3D = means3D,
         means2D = means2D,
         shs = shs,
@@ -143,16 +143,24 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     # assume the depth points form the 'surface' and generate psudo surface normal for regularizations.
     surf_normal = depth_to_normal(viewpoint_camera, surf_depth)
     surf_normal = surf_normal.permute(2,0,1)
-    # remember to multiply with accum_alpha since render_normal is unnormalized.
-    surf_normal = surf_normal * (render_alpha).detach()
+    # remember to multiply with accum_alpha since render_
+    # n_touched =estimate_n_touched(radii)
 
-
+    depth= allmap[0]
+    opacity= allmap[1]
+    print(f"n_touched: {n_touched.shape}")
+    print(f"opacity: {render_alpha.shape}")
+    print(f"depth: {surf_depth.shape}")
+    print(f"radii: {radii.shape}")
     rets.update({
             'rend_alpha': render_alpha,
             'rend_normal': render_normal,
             'rend_dist': render_dist,
             'surf_depth': surf_depth,
+            'opacity': opacity,
+            'depth': depth,
             'surf_normal': surf_normal,
+            'n_touched': n_touched
     })
 
     return rets

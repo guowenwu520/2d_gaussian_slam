@@ -209,6 +209,7 @@ int CudaRasterizer::Rasterizer::forward(
 	const float* scales,
 	const float scale_modifier,
 	const float* rotations,
+	// 这个参数不一样了cov3D_precomp
 	const float* transMat_precomp,
 	const float* viewmatrix,
 	const float* projmatrix,
@@ -216,8 +217,10 @@ int CudaRasterizer::Rasterizer::forward(
 	const float tan_fovx, float tan_fovy,
 	const bool prefiltered,
 	float* out_color,
+	// 多出来的参数
 	float* out_others,
 	int* radii,
+	int* n_touched,
 	bool debug)
 {
 	const float focal_y = height / (2.0f * tan_fovy);
@@ -255,6 +258,7 @@ int CudaRasterizer::Rasterizer::forward(
 		opacities,
 		shs,
 		geomState.clamped,
+		// 这里不一样了cov3D_precomp
 		transMat_precomp,
 		colors_precomp,
 		viewmatrix, projmatrix,
@@ -265,8 +269,10 @@ int CudaRasterizer::Rasterizer::forward(
 		radii,
 		geomState.means2D,
 		geomState.depths,
+		// 这里不一样了cov3D
 		geomState.transMat,
 		geomState.rgb,
+		// 这里不一样conic_opacity
 		geomState.normal_opacity,
 		tile_grid,
 		geomState.tiles_touched,
@@ -320,6 +326,7 @@ int CudaRasterizer::Rasterizer::forward(
 
 	// Let each tile blend its range of Gaussians independently in parallel
 	const float* feature_ptr = colors_precomp != nullptr ? colors_precomp : geomState.rgb;
+	// 多出来的一项
 	const float* transMat_ptr = transMat_precomp != nullptr ? transMat_precomp : geomState.transMat;
 	CHECK_CUDA(FORWARD::render(
 		tile_grid, block,
@@ -329,14 +336,19 @@ int CudaRasterizer::Rasterizer::forward(
 		focal_x, focal_y,
 		geomState.means2D,
 		feature_ptr,
+		// 多一项
 		transMat_ptr,
+		// 多两项，少一相conic_opacity
 		geomState.depths,
 		geomState.normal_opacity,
+
 		imgState.accum_alpha,
 		imgState.n_contrib,
 		background,
 		out_color,
-		out_others), debug)
+		// 多一项
+		out_others,
+		n_touched), debug)
 
 	return num_rendered;
 }
