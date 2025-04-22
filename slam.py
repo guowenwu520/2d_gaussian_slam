@@ -215,7 +215,7 @@ if __name__ == "__main__":
     save_dir = None
 
     if args.eval:
-        Log("Running RGBD_GS_SLAM in Evaluation Mode")
+        Log("Running MonoGS in Evaluation Mode")
         Log("Following config will be overriden")
         Log("\tsave_results=True")
         config["Results"]["save_results"] = True
@@ -241,7 +241,7 @@ if __name__ == "__main__":
             documents = yaml.dump(config, file)
         Log("saving results in " + save_dir)
         run = wandb.init(
-            project="RGBD_GS_SLAM",
+            project="MonoGS",
             name=f"{tmp}_{current_datetime}",
             config=config,
             mode=None if config["Results"]["use_wandb"] else "disabled",

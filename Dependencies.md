@@ -1,7 +1,7 @@
 ## List of Known Dependencies
-### RGBD_GS_SLAM
+### MonoGS
 
-In this document we list all the pieces of code included  by RGBD_GS_SLAM and linked libraries which are not property of the authors of RGBD_GS_SLAM.
+In this document we list all the pieces of code included  by MonoGS and linked libraries which are not property of the authors of MonoGS.
 
 
 ##### Code in gaussian_splatting folder

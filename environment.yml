@@ -1,4 +1,4 @@
-name: RGBD_GS_SLAM
+name: MonoGS
 channels:
   - pytorch
   - conda-forge

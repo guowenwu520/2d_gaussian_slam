@@ -1,4 +1,4 @@
-RGBD_GS_SLAM SOFTWARE
+MonoGS SOFTWARE
 
 LICENCE AGREEMENT
 
@@ -13,7 +13,7 @@ SOFTWARE LICENCE AGREEMENT (EXCLUDING BSD COMPONENTS)
 
 1.This Agreement pertains to a worldwide, non-exclusive, temporary, fully
 paid-up, royalty free, non-transferable, non-sub- licensable licence (the
-“Licence”) to use the RGBD_GS_SLAM source code, including any modification,
+“Licence”) to use the MonoGS source code, including any modification,
 part or derivative (the “Software”).
 
 Ownership and Licence. Your rights to use and download the Software onto your
@@ -218,7 +218,7 @@ SCHEDULE 1
 
 The Software
 
-RGBD_GS_SLAM is a framework for dense visual SLAM using 3D Gaussian Splatting, and supports monocular, stereo and RGB-D inputs. It is based on the techniques described in the following publication:
+MonoGS is a framework for dense visual SLAM using 3D Gaussian Splatting, and supports monocular, stereo and RGB-D inputs. It is based on the techniques described in the following publication:
 
     • Hidenobu Matsuki, Riku Murai, Paul H.J. Kelly Andrew J. Davison. Gaussian Splatting SLAM. CVPR, 2024
 _________________________

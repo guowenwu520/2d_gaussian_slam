@@ -8,8 +8,8 @@ import torch
 from evo.core import metrics, trajectory
 from evo.core.metrics import PoseRelation, Unit
 from evo.core.trajectory import PosePath3D, PoseTrajectory3D
-# from evo.tools import plot
-# from evo.tools.plot import PlotMode
+from evo.tools import plot
+from evo.tools.plot import PlotMode
 from evo.tools.settings import SETTINGS
 from matplotlib import pyplot as plt
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
@@ -24,10 +24,6 @@ from utils.logging_utils import Log
 
 def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False):
     ## Plot
-    # if len(poses_gt) < 3 or len(poses_est) < 3:
-    #     print("[warn] Not enough poses for alignment. Skipping ATE computation.")
-    #     return float("nan")
-
     traj_ref = PosePath3D(poses_se3=poses_gt)
     traj_est = PosePath3D(poses_se3=poses_est)
     traj_est_aligned = trajectory.align_trajectory(
