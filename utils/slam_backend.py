@@ -37,6 +37,18 @@ class BackEnd(mp.Process):
         self.current_window = []
         self.initialized = not self.monocular
         self.keyframe_optimizers = None
+    
+
+    def manhattan_position_loss(self,positions):
+        """
+        positions: [N, 3] 高斯球中心坐标
+        """
+        # 对每个点，鼓励它只在某个轴方向上显著
+        abs_pos = torch.abs(positions)           # [N, 3]
+        max_dim = abs_pos.max(dim=1, keepdim=True)[0]  # 每个点最大的方向
+        loss = abs_pos / (max_dim + 1e-6)        # 如果不是最大方向，会大于 1
+        loss = torch.clamp(loss, min=1.0) - 1.0  # 只有非最大方向才会产生损失
+        return loss.sum(dim=1).mean()
 
     def set_hyperparams(self):
         self.save_results = self.config["Results"]["save_results"]
@@ -97,6 +109,7 @@ class BackEnd(mp.Process):
                 depth,
                 opacity,
                 n_touched,
+                D3D_points,
             ) = (
                 render_pkg["render"],
                 render_pkg["viewspace_points"],
@@ -105,6 +118,7 @@ class BackEnd(mp.Process):
                 render_pkg["depth"],
                 render_pkg["opacity"],
                 render_pkg["n_touched"],
+                render_pkg["3d_points"],
             )
             loss_init = get_loss_mapping(
                 self.config, image, depth, viewpoint, opacity, initialization=True
@@ -138,6 +152,7 @@ class BackEnd(mp.Process):
         self.occ_aware_visibility[cur_frame_idx] = (n_touched > 0).long()
         Log("Initialized map")
         return render_pkg
+    
 
     def map(self, current_window, prune=False, iters=1):
         if len(current_window) == 0:
@@ -179,6 +194,7 @@ class BackEnd(mp.Process):
                     depth,
                     opacity,
                     n_touched,
+                    D3D_points,
                 ) = (
                     render_pkg["render"],
                     render_pkg["viewspace_points"],
@@ -187,11 +203,12 @@ class BackEnd(mp.Process):
                     render_pkg["depth"],
                     render_pkg["opacity"],
                     render_pkg["n_touched"],
+                    render_pkg["3d_points"],
                 )
 
                 loss_mapping += get_loss_mapping(
                     self.config, image, depth, viewpoint, opacity
-                )
+                ) + self.manhattan_position_loss(D3D_points)
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
                 visibility_filter_acm.append(visibility_filter)
                 radii_acm.append(radii)
@@ -210,6 +227,7 @@ class BackEnd(mp.Process):
                     depth,
                     opacity,
                     n_touched,
+                    D3D_points
                 ) = (
                     render_pkg["render"],
                     render_pkg["viewspace_points"],
@@ -218,10 +236,11 @@ class BackEnd(mp.Process):
                     render_pkg["depth"],
                     render_pkg["opacity"],
                     render_pkg["n_touched"],
+                    render_pkg["3d_points"],
                 )
                 loss_mapping += get_loss_mapping(
                     self.config, image, depth, viewpoint, opacity
-                )
+                ) + self.manhattan_position_loss(D3D_points)
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
                 visibility_filter_acm.append(visibility_filter)
                 radii_acm.append(radii)

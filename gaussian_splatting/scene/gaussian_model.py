@@ -282,7 +282,6 @@ class GaussianModel:
                 "name": "rotation",
             },
         ]
-
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         self.xyz_scheduler_args = get_expon_lr_func(
             lr_init=training_args.position_lr_init * self.spatial_lr_scale,
@@ -584,7 +583,23 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
+      
+        with torch.no_grad():  # 不追踪计算图，避免 autograd 报错
+            log_scaling = self._scaling
+            scaling = torch.exp(log_scaling)
+            min_scaling_idx = torch.argmin(scaling, dim=1)
 
+            new_log_scaling = log_scaling.clone()
+            new_log_scaling[torch.arange(new_log_scaling.size(0)), min_scaling_idx] -= 1.0
+
+            # 限制 log_scaling 的最小值，例如 -20（对应 2e-9 的尺度）
+            min_allowed_log = -90.0
+            new_log_scaling = torch.clamp(new_log_scaling, min=min_allowed_log)
+
+            self._scaling.data.copy_(new_log_scaling)
+
+            # print(" ll ",new_log_scaling)
+            # print("Densification done ",self._scaling.shape," sd ",self._scaling)
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")

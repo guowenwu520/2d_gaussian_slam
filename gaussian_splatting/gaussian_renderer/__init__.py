@@ -153,4 +153,5 @@ def render(
         "depth": depth,
         "opacity": opacity,
         "n_touched": n_touched,
+        "3d_points": means3D
     }

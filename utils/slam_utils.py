@@ -89,25 +89,6 @@ def get_loss_tracking_rgbd(
 
 
 def get_loss_mapping(config, image, depth, viewpoint, opacity, initialization=False):
-    # print("\n===== 参数维度信息 =====")
-    # print(f"1. config 类型: {type(config)}")
-    
-    # # 图像维度检查
-    # print(f"2. image 维度: {image.shape if hasattr(image, 'shape') else '无shape属性'}")
-    
-    # # 深度图维度检查
-    # print(f"3. depth 维度: {depth.shape if hasattr(depth, 'shape') else '无shape属性'}")
-    
-    # # 相机视角信息检查
-    # print(f"4. viewpoint 类型: {type(viewpoint)}")
-    # if hasattr(viewpoint, 'image_height'):
-    #     print(f"   图像高: {viewpoint.image_height}, 宽: {viewpoint.image_width}")
-    
-    # # 不透明度图检查
-    # print(f"5. opacity 维度: {opacity.shape if hasattr(opacity, 'shape') else '无shape属性'}")
-    
-    # print(f"6. initialization: {initialization}")
-    # print("=======================\n")
     if initialization:
         image_ab = image
     else:
@@ -126,7 +107,6 @@ def get_loss_mapping_rgb(config, image, depth, viewpoint):
     rgb_pixel_mask = (gt_image.sum(dim=0) > rgb_boundary_threshold).view(*mask_shape)
     l1_rgb = torch.abs(image * rgb_pixel_mask - gt_image * rgb_pixel_mask)
 
-    # print(f"8. l1_rgb: {l1_rgb.shape}")
     return l1_rgb.mean()
 
 
