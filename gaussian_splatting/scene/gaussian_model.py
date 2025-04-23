@@ -590,16 +590,9 @@ class GaussianModel:
             min_scaling_idx = torch.argmin(scaling, dim=1)
 
             new_log_scaling = log_scaling.clone()
-            new_log_scaling[torch.arange(new_log_scaling.size(0)), min_scaling_idx] -= 1.0
-
-            # 限制 log_scaling 的最小值，例如 -20（对应 2e-9 的尺度）
-            min_allowed_log = -90.0
-            new_log_scaling = torch.clamp(new_log_scaling, min=min_allowed_log)
+            new_log_scaling[torch.arange(new_log_scaling.size(0)), min_scaling_idx] -= 0.01
 
             self._scaling.data.copy_(new_log_scaling)
-
-            # print(" ll ",new_log_scaling)
-            # print("Densification done ",self._scaling.shape," sd ",self._scaling)
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
