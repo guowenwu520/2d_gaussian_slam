@@ -3,7 +3,7 @@ import time
 import numpy as np
 import torch
 import torch.multiprocessing as mp
-
+import matplotlib.pyplot as plt
 from gaussian_splatting.gaussian_renderer import render
 from gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, getWorld2View2
 from gui import gui_utils
@@ -176,10 +176,19 @@ class FrontEnd(mp.Process):
             loss_tracking.backward()
 
             with torch.no_grad():
+                # for name, param in pose_optimizer.named_parameters():
+                #     print(name, param.grad.norm().item() if param.grad is not None else None)
+
                 pose_optimizer.step()
+
+
                 converged = update_pose(viewpoint)
 
             if tracking_itr % 10 == 0:
+                # rendered_img = image.detach().cpu().permute(1,2,0).numpy()  # (H, W, 3)
+                # plt.imshow(rendered_img)
+                # plt.title(f"Tracking Rendered Frame {cur_frame_idx}")
+                # plt.show()
                 self.q_main2vis.put(
                     gui_utils.GaussianPacket(
                         current_frame=viewpoint,
@@ -314,7 +323,9 @@ class FrontEnd(mp.Process):
             torch.cuda.empty_cache()
 
     def run(self):
+        # 初始化当前帧索引
         cur_frame_idx = 0
+        # 获取投影矩阵
         projection_matrix = getProjectionMatrix2(
             znear=0.01,
             zfar=100.0,
@@ -325,26 +336,38 @@ class FrontEnd(mp.Process):
             W=self.dataset.width,
             H=self.dataset.height,
         ).transpose(0, 1)
+        # 将投影矩阵移动到指定设备
         projection_matrix = projection_matrix.to(device=self.device)
+        # 创建计时器
         tic = torch.cuda.Event(enable_timing=True)
         toc = torch.cuda.Event(enable_timing=True)
 
         while True:
+            # 如果可视化队列为空
             if self.q_vis2main.empty():
+                # 如果暂停，则继续
                 if self.pause:
                     continue
             else:
+                # 获取可视化队列中的数据
                 data_vis2main = self.q_vis2main.get()
+                # 设置暂停标志
                 self.pause = data_vis2main.flag_pause
+                # 如果暂停，则将暂停信号放入后台队列
                 if self.pause:
                     self.backend_queue.put(["pause"])
                     continue
                 else:
+                    # 否则，将取消暂停信号放入后台队列
                     self.backend_queue.put(["unpause"])
 
+            # 如果前台队列为空
             if self.frontend_queue.empty():
+                # 记录开始时间
                 tic.record()
+                # 如果当前帧索引大于等于数据集长度
                 if cur_frame_idx >= len(self.dataset):
+                    # 如果保存结果，则评估ATE
                     if self.save_results:
                         eval_ate(
                             self.cameras,
@@ -357,44 +380,78 @@ class FrontEnd(mp.Process):
                         save_gaussians(
                             self.gaussians, self.save_dir, "final", final=True
                         )
+                    # 退出循环
                     break
 
+                # 如果请求初始化，则等待0.01秒
                 if self.requested_init:
                     time.sleep(0.01)
                     continue
 
+                # 如果单线程且请求关键帧大于0，则等待0.01秒
                 if self.single_thread and self.requested_keyframe > 0:
                     time.sleep(0.01)
                     continue
 
+                # 如果未初始化且请求关键帧大于0，则等待0.01秒
                 if not self.initialized and self.requested_keyframe > 0:
                     time.sleep(0.01)
                     continue
 
+                # 从数据集中获取当前帧的相机视角
                 viewpoint = Camera.init_from_dataset(
                     self.dataset, cur_frame_idx, projection_matrix
                 )
+                # 计算梯度掩码
                 viewpoint.compute_grad_mask(self.config)
 
+                # 将当前帧的相机视角添加到相机列表中
                 self.cameras[cur_frame_idx] = viewpoint
 
+                # 如果重置，则初始化当前帧索引和相机视角
                 if self.reset:
                     self.initialize(cur_frame_idx, viewpoint)
                     self.current_window.append(cur_frame_idx)
                     cur_frame_idx += 1
                     continue
 
+                # 如果当前窗口大小等于窗口大小，则初始化
                 self.initialized = self.initialized or (
                     len(self.current_window) == self.window_size
                 )
 
                 # Tracking
                 render_pkg = self.tracking(cur_frame_idx, viewpoint)
+                # render_img = render_pkg["render"]  # 或者改成 render_pkg["rgb"]，看你那边叫什么
+
+
+                # # 如果是 GPU Tensor，要先搬到 CPU
+                # if render_img.is_cuda:
+                #     render_img = render_img.cpu()
+
+                # # 如果有 batch 维度 [B, C, H, W]，取第0个
+                # if render_img.ndim == 4:
+                #     render_img = render_img[0]
+
+                # # 确保是 (H, W, C) 格式
+                # if render_img.shape[0] == 3:  # [C, H, W] 形式
+                #     render_img = render_img.permute(1, 2, 0)
+
+                # # 有些渲染结果可能是 [-1, 1] 的，需要处理一下
+                # render_img = (render_img.clamp(0, 1)).detach().numpy()
+
+                # plt.figure(figsize=(8, 6))
+                # plt.imshow(render_img)
+                # plt.axis("off")
+                # plt.title(f"Rendered Frame {cur_frame_idx}")
+                # plt.show()
+
+
 
                 current_window_dict = {}
                 current_window_dict[self.current_window[0]] = self.current_window[1:]
                 keyframes = [self.cameras[kf_idx] for kf_idx in self.current_window]
-
+                # print(f" gaussian - conutrt  {len(keyframes)}")
                 self.q_main2vis.put(
                     gui_utils.GaussianPacket(
                         gaussians=clone_obj(self.gaussians),
@@ -412,6 +469,7 @@ class FrontEnd(mp.Process):
                 last_keyframe_idx = self.current_window[0]
                 check_time = (cur_frame_idx - last_keyframe_idx) >= self.kf_interval
                 curr_visibility = (render_pkg["n_touched"] > 0).long()
+                print("curr_visibility nonzero count:", curr_visibility.sum().item()," vount ",cur_frame_idx)
                 create_kf = self.is_keyframe(
                     cur_frame_idx,
                     last_keyframe_idx,

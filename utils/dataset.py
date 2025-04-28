@@ -82,7 +82,8 @@ class TUMParser:
 
         image_list = os.path.join(datapath, "rgb.txt")
         depth_list = os.path.join(datapath, "depth.txt")
-
+        self.is_plane_info = os.path.isfile(os.path.join(datapath, "plane.txt"))
+      
         image_data = self.parse_list(image_list)
         depth_data = self.parse_list(depth_list)
         pose_data = self.parse_list(pose_list, skiprows=1)
@@ -92,30 +93,37 @@ class TUMParser:
         tstamp_depth = depth_data[:, 0].astype(np.float64)
         tstamp_pose = pose_data[:, 0].astype(np.float64)
         associations = self.associate_frames(tstamp_image, tstamp_depth, tstamp_pose)
-
+            
         indicies = [0]
         for i in range(1, len(associations)):
             t0 = tstamp_image[associations[indicies[-1]][0]]
             t1 = tstamp_image[associations[i][0]]
             if t1 - t0 > 1.0 / frame_rate:
                 indicies += [i]
+        if self.is_plane_info:
+            plane_list = os.path.join(datapath, "plane.txt") 
+            plane_data = self.parse_list(plane_list)  
+            # tstamp_plane = plane_data[:, 0].astype(np.float64)     
 
-        self.color_paths, self.poses, self.depth_paths, self.frames = [], [], [], []
+        self.color_paths, self.poses, self.depth_paths, self.frames ,self.plane_info = [], [], [], [],[]
 
         for ix in indicies:
             (i, j, k) = associations[ix]
             self.color_paths += [os.path.join(datapath, image_data[i, 1])]
             self.depth_paths += [os.path.join(datapath, depth_data[j, 1])]
+            if self.is_plane_info:
+                self.plane_info += [os.path.join(datapath, plane_data[i, 1])]
 
             quat = pose_vecs[k][4:]
             trans = pose_vecs[k][1:4]
             T = trimesh.transformations.quaternion_matrix(np.roll(quat, 1))
             T[:3, 3] = trans
             self.poses += [np.linalg.inv(T)]
-
+            # print(datapath ,"  -- ",plane_data[i, 1])
             frame = {
                 "file_path": str(os.path.join(datapath, image_data[i, 1])),
                 "depth_path": str(os.path.join(datapath, depth_data[j, 1])),
+                "plane_path": str(os.path.join(datapath, plane_data[i, 1])),
                 "transform_matrix": (np.linalg.inv(T)).tolist(),
             }
 
@@ -253,7 +261,31 @@ class MonocularDataset(BaseDataset):
                 "translation": np.zeros(3),
             },
         }
-
+    def parse_plane_info_from_file(self,file_path):
+        planes = []
+        with open(file_path, 'r') as f:
+            for line in f:
+                if not line.strip() or line.startswith("#"):
+                    continue  # 跳过空行
+                tokens = list(map(float, line.strip().split()))
+                plane = {
+                    'index': int(tokens[0]),
+                    'num_points': int(tokens[1]),
+                    'color': tuple(map(int, tokens[2:5])),
+                    'normal': tuple(tokens[5:8]),
+                    'center': tuple(tokens[8:11]),
+                    'mean': tuple(tokens[11:14]),
+                    'cov': {
+                        'sxx': tokens[14],
+                        'syy': tokens[15],
+                        'szz': tokens[16],
+                        'sxy': tokens[17],
+                        'syz': tokens[18],
+                        'sxz': tokens[19],
+                    }
+                }
+                planes.append(plane)
+        return planes
     def __getitem__(self, idx):
         color_path = self.color_paths[idx]
         pose = self.poses[idx]
@@ -267,6 +299,7 @@ class MonocularDataset(BaseDataset):
         if self.has_depth:
             depth_path = self.depth_paths[idx]
             depth = np.array(Image.open(depth_path)) / self.depth_scale
+        
 
         image = (
             torch.from_numpy(image / 255.0)
@@ -275,7 +308,12 @@ class MonocularDataset(BaseDataset):
             .to(device=self.device, dtype=self.dtype)
         )
         pose = torch.from_numpy(pose).to(device=self.device)
-        return image, depth, pose
+        plane_info = []
+        if self.is_plane_info:
+            plane_path = self.plane_paths[idx]
+            plane_info = self.parse_plane_info_from_file(plane_path)
+            # return image, depth, pose,plane_info
+        return image, depth, pose,plane_info
 
 
 class StereoDataset(BaseDataset):
@@ -402,6 +440,8 @@ class TUMDataset(MonocularDataset):
         self.color_paths = parser.color_paths
         self.depth_paths = parser.depth_paths
         self.poses = parser.poses
+        self.plane_paths = parser.plane_info
+        self.is_plane_info = parser.is_plane_info
 
 
 class ReplicaDataset(MonocularDataset):

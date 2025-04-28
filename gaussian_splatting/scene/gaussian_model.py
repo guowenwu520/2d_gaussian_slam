@@ -519,6 +519,7 @@ class GaussianModel:
 
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
+        # self.tmp_radii = self.tmp_radii[valid_points_mask]
         self.unique_kfIDs = self.unique_kfIDs[valid_points_mask.cpu()]
         self.n_obs = self.n_obs[valid_points_mask.cpu()]
 
@@ -583,6 +584,8 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
+        print("densification_postfix ",new_kf_ids)
+        # self.tmp_radii = torch.cat((self.tmp_radii, new_tmp_radii))
       
         with torch.no_grad():  # 不追踪计算图，避免 autograd 报错
             log_scaling = self._scaling
@@ -590,8 +593,7 @@ class GaussianModel:
             min_scaling_idx = torch.argmin(scaling, dim=1)
 
             new_log_scaling = log_scaling.clone()
-            new_log_scaling[torch.arange(new_log_scaling.size(0)), min_scaling_idx] -= 0.01
-
+            new_log_scaling[torch.arange(new_log_scaling.size(0)), min_scaling_idx] -= 2
             self._scaling.data.copy_(new_log_scaling)
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -627,6 +629,7 @@ class GaussianModel:
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N, 1, 1)
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N, 1, 1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N, 1)
+        # new_tmp_radii = self.tmp_radii[selected_pts_mask].repeat(N)
 
         new_kf_id = self.unique_kfIDs[selected_pts_mask.cpu()].repeat(N)
         new_n_obs = self.n_obs[selected_pts_mask.cpu()].repeat(N)
@@ -668,6 +671,7 @@ class GaussianModel:
         new_opacities = self._opacity[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
+        # new_tmp_radii = self.tmp_radii[selected_pts_mask]
 
         new_kf_id = self.unique_kfIDs[selected_pts_mask.cpu()]
         new_n_obs = self.n_obs[selected_pts_mask.cpu()]
@@ -683,9 +687,12 @@ class GaussianModel:
         )
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
+        # 计算梯度
         grads = self.xyz_gradient_accum / self.denom
+        # 将NaN值替换为0
         grads[grads.isnan()] = 0.0
 
+        # self.tmp_radii = radii
         self.densify_and_clone(grads, max_grad, extent)
         self.densify_and_split(grads, max_grad, extent)
 
@@ -698,6 +705,8 @@ class GaussianModel:
                 torch.logical_or(prune_mask, big_points_vs), big_points_ws
             )
         self.prune_points(prune_mask)
+        #   tmp_radii = self.tmp_radii
+        # self.tmp_radii = None
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(

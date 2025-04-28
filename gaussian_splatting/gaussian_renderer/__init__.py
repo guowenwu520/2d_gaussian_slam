@@ -46,6 +46,14 @@ def render(
         )
         + 0
     )
+
+    means3D = pc.get_xyz  # (N, 3)
+
+    # # -- 这里是正确的方式：应用 viewmatrix --
+    # # viewmatrix 是 (4, 4)，把 means3D 变成齐次 (N,4)
+    # means3D_homo = torch.cat([means3D, torch.ones_like(means3D[:, :1])], dim=-1)  # (N, 4)
+    # screenspace_points = (viewpoint_camera.world_view_transform @ means3D_homo.T).T[:, :3]
+    # screenspace_points.requires_grad_(True) 
     try:
         screenspace_points.retain_grad()
     except Exception:
@@ -64,16 +72,16 @@ def render(
         scale_modifier=scaling_modifier,
         viewmatrix=viewpoint_camera.world_view_transform,
         projmatrix=viewpoint_camera.full_proj_transform,
-        projmatrix_raw=viewpoint_camera.projection_matrix,
         sh_degree=pc.active_sh_degree,
         campos=viewpoint_camera.camera_center,
         prefiltered=False,
         debug=False,
+        antialiasing=True,
     )
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
-    means3D = pc.get_xyz
+    # means3D = pc.get_xyz
     means2D = screenspace_points
     opacity = pc.get_opacity
 
@@ -117,32 +125,28 @@ def render(
         rendered_image, radii, depth, opacity = rasterizer(
             means3D=means3D[mask],
             means2D=means2D[mask],
+            opacities=opacity[mask],
             shs=shs[mask],
             colors_precomp=colors_precomp[mask] if colors_precomp is not None else None,
-            opacities=opacity[mask],
             scales=scales[mask],
             rotations=rotations[mask],
-            cov3D_precomp=cov3D_precomp[mask] if cov3D_precomp is not None else None,
-            theta=viewpoint_camera.cam_rot_delta,
-            rho=viewpoint_camera.cam_trans_delta,
+            cov3D_precomp=cov3D_precomp[mask] if cov3D_precomp is not None else None
         )
     else:
         rendered_image, radii, depth, opacity, n_touched = rasterizer(
             means3D=means3D,
             means2D=means2D,
+            opacities=opacity,
             shs=shs,
             colors_precomp=colors_precomp,
-            opacities=opacity,
             scales=scales,
             rotations=rotations,
-            cov3D_precomp=cov3D_precomp,
-            theta=viewpoint_camera.cam_rot_delta,
-            rho=viewpoint_camera.cam_trans_delta,
+            cov3D_precomp=cov3D_precomp
         )
-    # print(f"n_touched: {n_touched.shape}")
-    # print(f"opacity: {opacity.shape}")
-    # print(f"depth: {depth.shape}")
-    # print(f"radii: {radii.shape}")
+        # print(f"n_touched: {n_touched.shape}")
+        # print(f"opacity: {opacity.shape}")
+        # print(f"depth: {depth.shape}")
+        # print(f"radii: {radii.shape}")
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
     return {

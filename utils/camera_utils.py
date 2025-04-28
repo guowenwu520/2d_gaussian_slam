@@ -22,6 +22,7 @@ class Camera(nn.Module):
         image_height,
         image_width,
         device="cuda:0",
+        plane_info=None
     ):
         super(Camera, self).__init__()
         self.uid = uid
@@ -32,7 +33,7 @@ class Camera(nn.Module):
         self.T = T[:3, 3]
         self.R_gt = gt_T[:3, :3]
         self.T_gt = gt_T[:3, 3]
-
+        self.plane_info = plane_info
         self.original_image = color
         self.depth = depth
         self.grad_mask = None
@@ -64,7 +65,8 @@ class Camera(nn.Module):
 
     @staticmethod
     def init_from_dataset(dataset, idx, projection_matrix):
-        gt_color, gt_depth, gt_pose = dataset[idx]
+        gt_color, gt_depth, gt_pose ,plane_info = dataset[idx]
+       
         return Camera(
             idx,
             gt_color,
@@ -80,6 +82,7 @@ class Camera(nn.Module):
             dataset.height,
             dataset.width,
             device=dataset.device,
+            plane_info=plane_info
         )
 
     @staticmethod

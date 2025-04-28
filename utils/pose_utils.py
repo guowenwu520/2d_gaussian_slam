@@ -75,7 +75,9 @@ def SE3_exp(tau):
 
 def update_pose(camera, converged_threshold=1e-4):
     tau = torch.cat([camera.cam_trans_delta, camera.cam_rot_delta], axis=0)
-
+    print('tau norm:', tau.norm().item())
+    print('cam_trans_delta:', camera.cam_trans_delta)
+    print('cam_rot_delta:', camera.cam_rot_delta)
     T_w2c = torch.eye(4, device=tau.device)
     T_w2c[0:3, 0:3] = camera.R
     T_w2c[0:3, 3] = camera.T

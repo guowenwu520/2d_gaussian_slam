@@ -24,14 +24,18 @@ from utils.logging_utils import Log
 
 def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False):
     ## Plot
+    # 创建参考轨迹和估计轨迹
     traj_ref = PosePath3D(poses_se3=poses_gt)
     traj_est = PosePath3D(poses_se3=poses_est)
+    # 对估计轨迹进行对齐
     traj_est_aligned = trajectory.align_trajectory(
         traj_est, traj_ref, correct_scale=monocular
     )
 
     ## RMSE
+    # 定义姿态关系为平移部分
     pose_relation = metrics.PoseRelation.translation_part
+    # 处理数据
     data = (traj_ref, traj_est_aligned)
     ape_metric = metrics.APE(pose_relation)
     ape_metric.process_data(data)
@@ -135,7 +139,7 @@ def eval_rendering(
             continue
         saved_frame_idx.append(idx)
         frame = frames[idx]
-        gt_image, _, _ = dataset[idx]
+        gt_image, _, _ , _= dataset[idx]
 
         rendering = render(frame, gaussians, pipe, background)["render"]
         image = torch.clamp(rendering, 0.0, 1.0)

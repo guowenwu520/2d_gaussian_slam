@@ -4,7 +4,10 @@ import time
 import torch
 import torch.multiprocessing as mp
 from tqdm import tqdm
-
+import open3d as o3d
+import numpy as np
+import torch.nn.functional as F
+from sklearn.neighbors import NearestNeighbors
 from gaussian_splatting.gaussian_renderer import render
 from gaussian_splatting.utils.loss_utils import l1_loss, ssim
 from utils.logging_utils import Log
@@ -38,17 +41,59 @@ class BackEnd(mp.Process):
         self.initialized = not self.monocular
         self.keyframe_optimizers = None
     
+  
+    def manhattan_position_loss_on_plane(self,positions, viewpoint, eps=0.01):
+            device = positions.device
+            plane_centers = torch.stack([torch.tensor(p['center'], device=device) for p in viewpoint.plane_info], dim=0)  # [P, 3]
+            plane_normals = torch.stack([torch.tensor(p['normal'], device=device) for p in viewpoint.plane_info], dim=0)  # [P, 3]
 
-    def manhattan_position_loss(self,positions):
-        """
-        positions: [N, 3] 高斯球中心坐标
-        """
-        # 对每个点，鼓励它只在某个轴方向上显著
-        abs_pos = torch.abs(positions)           # [N, 3]
-        max_dim = abs_pos.max(dim=1, keepdim=True)[0]  # 每个点最大的方向
-        loss = abs_pos / (max_dim + 1e-6)        # 如果不是最大方向，会大于 1
-        loss = torch.clamp(loss, min=1.0) - 1.0  # 只有非最大方向才会产生损失
-        return loss.sum(dim=1).mean()
+            N = positions.shape[0]
+            P = plane_centers.shape[0]
+
+            points_expanded = positions.unsqueeze(1).expand(-1, P, -1)  # [N, P, 3]
+            centers_expanded = plane_centers.unsqueeze(0).expand(N, -1, -1)  # [N, P, 3]
+            normals_expanded = plane_normals.unsqueeze(0).expand(N, -1, -1)  # [N, P, 3]
+
+            vec = points_expanded - centers_expanded
+            dists = torch.abs((vec * normals_expanded).sum(dim=2))
+
+            min_dists, min_indices = dists.min(dim=1)
+            plane_mask = min_dists < eps
+
+            plane_positions = positions[plane_mask]
+            assigned_planes = min_indices[plane_mask]
+
+            if plane_positions.shape[0] == 0:
+                return torch.tensor(0.0, device=device)
+
+            # Now for each point, build local frame
+            losses = []
+            for idx, point in enumerate(plane_positions):
+                plane_idx = assigned_planes[idx]
+                normal = plane_normals[plane_idx]
+
+                # Find two vectors orthogonal to normal
+                tangent1 = torch.tensor([1.0, 0.0, 0.0], device=device)
+                if torch.allclose(normal, tangent1, atol=1e-2):
+                    tangent1 = torch.tensor([0.0, 1.0, 0.0], device=device)
+                tangent1 = tangent1 - (tangent1 @ normal) * normal
+                tangent1 = tangent1 / (tangent1.norm() + 1e-6)
+
+                tangent2 = torch.cross(normal, tangent1)
+
+                # Build local basis matrix
+                local_basis = torch.stack([tangent1, tangent2, normal], dim=1)  # [3,3]
+
+                local_coord = (point - plane_centers[plane_idx]) @ local_basis  # [3]
+
+                abs_pos = torch.abs(local_coord[:2])  # Only in-plane components
+                max_dim = abs_pos.max()
+                loss = torch.clamp(abs_pos / (max_dim + 1e-6), min=1.0) - 1.0
+                losses.append(loss.sum())
+
+            total_loss = torch.stack(losses).mean()
+            return total_loss
+
 
     def set_hyperparams(self):
         self.save_results = self.config["Results"]["save_results"]
@@ -90,7 +135,7 @@ class BackEnd(mp.Process):
         self.keyframe_optimizers = None
 
         # remove all gaussians
-        self.gaussians.prune_points(self.gaussians.unique_kfIDs >= 0)
+        # self.gaussians.prune_points(self.gaussians.unique_kfIDs >= 0)
         # remove everything from the queues
         while not self.backend_queue.empty():
             self.backend_queue.get()
@@ -208,7 +253,9 @@ class BackEnd(mp.Process):
 
                 loss_mapping += get_loss_mapping(
                     self.config, image, depth, viewpoint, opacity
-                ) + self.manhattan_position_loss(D3D_points)
+                ) 
+                + self.manhattan_position_loss_on_plane(D3D_points, viewpoint)
+                # self.visualize_planar_classification(D3D_points, plane_mask)
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
                 visibility_filter_acm.append(visibility_filter)
                 radii_acm.append(radii)
@@ -238,9 +285,11 @@ class BackEnd(mp.Process):
                     render_pkg["n_touched"],
                     render_pkg["3d_points"],
                 )
+
                 loss_mapping += get_loss_mapping(
                     self.config, image, depth, viewpoint, opacity
-                ) + self.manhattan_position_loss(D3D_points)
+                ) 
+                + self.manhattan_position_loss_on_plane(D3D_points, viewpoint)
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
                 visibility_filter_acm.append(visibility_filter)
                 radii_acm.append(radii)
