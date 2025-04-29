@@ -13,6 +13,8 @@ import os
 
 import numpy as np
 import open3d as o3d
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 import torch
 from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2
@@ -168,6 +170,47 @@ class GaussianModel:
         new_xyz = np.asarray(pcd_tmp.points)
         new_rgb = np.asarray(pcd_tmp.colors)
 
+        # 获取 cam 中的 plane_info
+        plane_centers = torch.stack([torch.tensor(p['center'], device='cuda') for p in cam.plane_info], dim=0)
+        plane_normals = torch.stack([torch.tensor(p['normal'], device='cuda') for p in cam.plane_info], dim=0)
+        
+        #   # 将数据从 CUDA 转移到 CPU
+        # plane_centers = plane_centers.cpu().numpy()
+        # plane_normals = plane_normals.cpu().numpy()
+        # scale_factor = 600.0
+        # plane_centers /= scale_factor
+        # # 创建一个空的点云对象
+        # point_cloud = o3d.geometry.PointCloud()
+
+        # # 将平面中心点添加到点云中
+        # point_cloud.points = o3d.utility.Vector3dVector(plane_centers)
+
+        # # 创建法线向量
+        # lines = []
+        # for i in range(len(plane_centers)):
+        #     lines.append([i, i])  # 每个点的法线线段是从平面中心点到法线方向
+
+        # # 生成法线的起点和终点
+        # line_points = []
+        # for i in range(len(plane_centers)):
+        #     start = plane_centers[i]
+        #     end = plane_centers[i] + plane_normals[i] * 8  # 法线长度为0.1
+        #     line_points.append(start)
+        #     line_points.append(end)
+
+        # # 转换成 Open3D 的线段格式
+        # lines = np.array(lines)
+        # line_points = np.array(line_points)
+
+        # # 创建线段几何体
+        # line_set = o3d.geometry.LineSet()
+        # line_set.points = o3d.utility.Vector3dVector(line_points)
+        # line_set.lines = o3d.utility.Vector2iVector(lines)
+
+        # # 设置线段的颜色为红色
+        # line_set.paint_uniform_color([1, 0, 0])  # 红色
+
+
         pcd = BasicPointCloud(
             points=new_xyz, colors=new_rgb, normals=np.zeros((new_xyz.shape[0], 3))
         )
@@ -182,6 +225,46 @@ class GaussianModel:
         )
         features[:, :3, 0] = fused_color
         features[:, 3:, 1:] = 0.0
+
+        fused_point_cloud_original = fused_point_cloud.clone()
+        print(f"plane_centers :{plane_centers} {plane_normals} dian {fused_point_cloud_original}")
+       # 计算每个点到平面的距离，并根据最近的平面选择进行投影
+        eps = 3  # 设置一个距离阈值，只有接近平面的点才会修改
+        for idx, point in enumerate(fused_point_cloud):
+            # 计算每个点到所有平面的距离
+            dist_to_planes = torch.abs(torch.sum((point - plane_centers) * plane_normals, dim=1))  # [P]
+
+            # 找到距离点最近的平面索引
+            plane_idx = torch.argmin(dist_to_planes)
+
+            # 获取最近平面的中心和法线
+            vec_to_plane = point - plane_centers[plane_idx]  # 点到平面的向量
+            normal = plane_normals[plane_idx]
+
+            # 计算点到平面的距离
+            dist_to_plane = torch.abs(torch.dot(vec_to_plane, normal))
+
+            # 如果点接近平面（距离小于阈值），就投影到平面上
+            print(f'dist_to_plane :{dist_to_plane}  ')
+            if dist_to_plane < eps:
+                projection = vec_to_plane - torch.dot(vec_to_plane, normal) * normal  # 投影到平面
+                fused_point_cloud[idx] = plane_centers[plane_idx] + projection 
+
+
+        # 将修改前后的点云分别转换为Open3D格式以进行可视化
+        pcd_original = o3d.geometry.PointCloud()
+        pcd_modified = o3d.geometry.PointCloud()
+
+        # 生成原始点云
+        pcd_original.points = o3d.utility.Vector3dVector(fused_point_cloud_original.cpu().numpy())
+        pcd_original.colors = o3d.utility.Vector3dVector(np.ones_like(fused_point_cloud_original.cpu().numpy())*[0,1,0])  # 设置为白色
+
+        # 生成修改后的点云
+        pcd_modified.points = o3d.utility.Vector3dVector(fused_point_cloud.cpu().numpy())
+        pcd_modified.colors = o3d.utility.Vector3dVector(np.zeros_like(fused_point_cloud.cpu().numpy()))  # 设置为黑色
+
+        # 可视化修改前后的点云
+        o3d.visualization.draw_geometries([pcd_original,pcd_modified])
 
         dist2 = (
             torch.clamp_min(
