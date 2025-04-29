@@ -20,6 +20,8 @@ from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2
 from torch import nn
 
+from sklearn.neighbors import NearestNeighbors
+from collections import deque
 from gaussian_splatting.utils.general_utils import (
     build_rotation,
     build_scaling_rotation,
@@ -135,158 +137,243 @@ class GaussianModel:
 
         return self.create_pcd_from_image_and_depth(cam, rgb, depth, init)
 
-    def create_pcd_from_image_and_depth(self, cam, rgb, depth, init=False):
-        if init:
-            downsample_factor = self.config["Dataset"]["pcd_downsample_init"]
-        else:
-            downsample_factor = self.config["Dataset"]["pcd_downsample"]
-        point_size = self.config["Dataset"]["point_size"]
-        if "adaptive_pointsize" in self.config["Dataset"]:
-            if self.config["Dataset"]["adaptive_pointsize"]:
-                point_size = min(0.05, point_size * np.median(depth))
-        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
-            rgb,
-            depth,
-            depth_scale=1.0,
-            depth_trunc=100.0,
-            convert_rgb_to_intensity=False,
-        )
-
-        W2C = getWorld2View2(cam.R, cam.T).cpu().numpy()
-        pcd_tmp = o3d.geometry.PointCloud.create_from_rgbd_image(
-            rgbd,
-            o3d.camera.PinholeCameraIntrinsic(
-                cam.image_width,
-                cam.image_height,
-                cam.fx,
-                cam.fy,
-                cam.cx,
-                cam.cy,
-            ),
-            extrinsic=W2C,
-            project_valid_depth_only=True,
-        )
-        pcd_tmp = pcd_tmp.random_down_sample(1.0 / downsample_factor)
-        new_xyz = np.asarray(pcd_tmp.points)
-        new_rgb = np.asarray(pcd_tmp.colors)
-
-        # 获取 cam 中的 plane_info
-        plane_centers = torch.stack([torch.tensor(p['center'], device='cuda') for p in cam.plane_info], dim=0)
-        plane_normals = torch.stack([torch.tensor(p['normal'], device='cuda') for p in cam.plane_info], dim=0)
-        
-        #   # 将数据从 CUDA 转移到 CPU
-        # plane_centers = plane_centers.cpu().numpy()
-        # plane_normals = plane_normals.cpu().numpy()
-        # scale_factor = 600.0
-        # plane_centers /= scale_factor
-        # # 创建一个空的点云对象
-        # point_cloud = o3d.geometry.PointCloud()
-
-        # # 将平面中心点添加到点云中
-        # point_cloud.points = o3d.utility.Vector3dVector(plane_centers)
-
-        # # 创建法线向量
-        # lines = []
-        # for i in range(len(plane_centers)):
-        #     lines.append([i, i])  # 每个点的法线线段是从平面中心点到法线方向
-
-        # # 生成法线的起点和终点
-        # line_points = []
-        # for i in range(len(plane_centers)):
-        #     start = plane_centers[i]
-        #     end = plane_centers[i] + plane_normals[i] * 8  # 法线长度为0.1
-        #     line_points.append(start)
-        #     line_points.append(end)
-
-        # # 转换成 Open3D 的线段格式
-        # lines = np.array(lines)
-        # line_points = np.array(line_points)
-
-        # # 创建线段几何体
-        # line_set = o3d.geometry.LineSet()
-        # line_set.points = o3d.utility.Vector3dVector(line_points)
-        # line_set.lines = o3d.utility.Vector2iVector(lines)
-
-        # # 设置线段的颜色为红色
-        # line_set.paint_uniform_color([1, 0, 0])  # 红色
 
 
-        pcd = BasicPointCloud(
-            points=new_xyz, colors=new_rgb, normals=np.zeros((new_xyz.shape[0], 3))
-        )
-        self.ply_input = pcd
+    def region_growing(self,xyz, normals, radius=0.5, angle_threshold=np.deg2rad(15), min_cluster_size=400):
+        """
+        :param xyz: (N, 3) 点坐标
+        :param normals: (N, 3) 点的单位法向量
+        :param radius: 邻域半径
+        :param angle_threshold: 法向夹角阈值（弧度）
+        :param min_cluster_size: 最小平面点数
+        :return: list of clusters，每个是索引数组
+        """
+        N = xyz.shape[0]
+        visited = np.zeros(N, dtype=bool)
+        clusters = []
 
-        fused_point_cloud = torch.from_numpy(np.asarray(pcd.points)).float().cuda()
-        fused_color = RGB2SH(torch.from_numpy(np.asarray(pcd.colors)).float().cuda())
-        features = (
-            torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2))
-            .float()
-            .cuda()
-        )
-        features[:, :3, 0] = fused_color
-        features[:, 3:, 1:] = 0.0
+        # 建立 KD-Tree 查找邻居
+        nbrs = NearestNeighbors(radius=radius).fit(xyz)
 
-        fused_point_cloud_original = fused_point_cloud.clone()
-        print(f"plane_centers :{plane_centers} {plane_normals} dian {fused_point_cloud_original}")
-       # 计算每个点到平面的距离，并根据最近的平面选择进行投影
-        eps = 3  # 设置一个距离阈值，只有接近平面的点才会修改
-        for idx, point in enumerate(fused_point_cloud):
-            # 计算每个点到所有平面的距离
-            dist_to_planes = torch.abs(torch.sum((point - plane_centers) * plane_normals, dim=1))  # [P]
+        for idx in range(N):
+            if visited[idx]:
+                continue
 
-            # 找到距离点最近的平面索引
-            plane_idx = torch.argmin(dist_to_planes)
+            # 初始化一个新区域
+            queue = deque([idx])
+            visited[idx] = True
+            cluster = [idx]
 
-            # 获取最近平面的中心和法线
-            vec_to_plane = point - plane_centers[plane_idx]  # 点到平面的向量
-            normal = plane_normals[plane_idx]
+            while queue:
+                curr_idx = queue.popleft()
+                curr_normal = normals[curr_idx]
+                _, neighbors = nbrs.radius_neighbors([xyz[curr_idx]], return_distance=True)
 
-            # 计算点到平面的距离
-            dist_to_plane = torch.abs(torch.dot(vec_to_plane, normal))
+                for neighbor_idx in neighbors[0]:
+                    if visited[neighbor_idx]:
+                        continue
+                    # 法向夹角小于阈值才合并
+                    angle = np.arccos(np.clip(np.dot(curr_normal, normals[neighbor_idx]), -1.0, 1.0))
+                    if angle < angle_threshold:
+                        visited[neighbor_idx] = True
+                        queue.append(neighbor_idx)
+                        cluster.append(neighbor_idx)
 
-            # 如果点接近平面（距离小于阈值），就投影到平面上
-            print(f'dist_to_plane :{dist_to_plane}  ')
-            if dist_to_plane < eps:
-                projection = vec_to_plane - torch.dot(vec_to_plane, normal) * normal  # 投影到平面
-                fused_point_cloud[idx] = plane_centers[plane_idx] + projection 
+            if len(cluster) >= min_cluster_size:
+                clusters.append(np.array(cluster))
+                break
 
-
-        # 将修改前后的点云分别转换为Open3D格式以进行可视化
+        return clusters
+    def fit_plane_svd(self,points):
+        """
+        对输入点集拟合平面，返回法向量和中心点
+        :param points: (M, 3) array
+        :return: normal: (3,), center: (3,)
+        """
+        center = points.mean(axis=0)
+        _, _, vh = np.linalg.svd(points - center)
+        normal = vh[2, :]
+        # 方向统一化：确保法向量朝上（或者其他一致的方向）
+        if normal[2] < 0:
+            normal = -normal
+        return normal, center
+    def visualize_before_and_after(self,xyz, normals, adjusted_xyz, adjusted_normals):
+        # 创建原始点云
         pcd_original = o3d.geometry.PointCloud()
-        pcd_modified = o3d.geometry.PointCloud()
+        pcd_original.points = o3d.utility.Vector3dVector(xyz)
+        pcd_original.normals = o3d.utility.Vector3dVector(normals)
+        pcd_original.paint_uniform_color([0.7, 0.7, 0.7])  # 灰色
 
-        # 生成原始点云
-        pcd_original.points = o3d.utility.Vector3dVector(fused_point_cloud_original.cpu().numpy())
-        pcd_original.colors = o3d.utility.Vector3dVector(np.ones_like(fused_point_cloud_original.cpu().numpy())*[0,1,0])  # 设置为白色
+        # 创建调整后的点云
+        pcd_adjusted = o3d.geometry.PointCloud()
+        pcd_adjusted.points = o3d.utility.Vector3dVector(adjusted_xyz)
+        pcd_adjusted.normals = o3d.utility.Vector3dVector(adjusted_normals)
+        pcd_adjusted.paint_uniform_color([1.0, 0.0, 0.0])  # 绿色
 
-        # 生成修改后的点云
-        pcd_modified.points = o3d.utility.Vector3dVector(fused_point_cloud.cpu().numpy())
-        pcd_modified.colors = o3d.utility.Vector3dVector(np.zeros_like(fused_point_cloud.cpu().numpy()))  # 设置为黑色
+        # 可视化
+        o3d.visualization.draw_geometries([pcd_original, pcd_adjusted])
 
-        # 可视化修改前后的点云
-        o3d.visualization.draw_geometries([pcd_original,pcd_modified])
+    def point_to_plane_distance(self,point, plane_center, plane_normal):
+        """
+        计算点到平面的距离，并返回调整后的点。
+        :param point: 点的位置 (3,)
+        :param plane_center: 平面的中心点 (3,)
+        :param plane_normal: 平面的法向量 (3,)
+        :return: 距离、调整后的点
+        """
+        # 计算点到平面的向量
+        point_to_plane_vector = point - plane_center
+        # 点到平面的距离（点到平面的投影长度）
+        distance = np.dot(point_to_plane_vector, plane_normal)
+        # 调整后的点
+        adjusted_point = point - distance * plane_normal
+        return distance, adjusted_point
 
-        dist2 = (
-            torch.clamp_min(
-                distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()),
-                0.0000001,
+    def adjust_points_to_planes(self,xyz, planes,normals, distance_threshold=0.1):
+        """
+        调整点到平面上，并更新每个点的法向量。
+        :param xyz: 点坐标 (N, 3)
+        :param planes: 包含平面信息的列表，每个平面包含 {"normal": normal, "center": center, "indices": indices}
+        :param distance_threshold: 距离阈值，表示点到平面距离小于此值则进行调整
+        :return: 更新后的点坐标和法向量
+        """
+        # 存储调整后的点坐标和法向量
+        adjusted_xyz = np.copy(xyz)
+        adjusted_normals = np.copy(normals)
+
+        # 对于每个平面
+        for plane in planes:
+            normal = plane["normal"]
+            center = plane["center"]
+            cluster_indices = plane["indices"]
+
+            # 对于平面上的每个点
+            for idx in cluster_indices:
+                point = xyz[idx]
+                # 计算点到平面的距离
+                distance, adjusted_point = self.point_to_plane_distance(point, center, normal)
+              
+                # 如果距离小于阈值，调整该点
+                if np.abs(distance) < distance_threshold:
+                    adjusted_xyz[idx] = adjusted_point
+                    adjusted_normals[idx] = normal  # 更新法向量为平面的法向量
+
+        return adjusted_xyz, adjusted_normals
+    
+    def create_pcd_from_image_and_depth(self, cam, rgb, depth, init=False):
+            if init:
+                downsample_factor = self.config["Dataset"]["pcd_downsample_init"]
+            else:
+                downsample_factor = self.config["Dataset"]["pcd_downsample"]
+            point_size = self.config["Dataset"]["point_size"]
+            if "adaptive_pointsize" in self.config["Dataset"]:
+                if self.config["Dataset"]["adaptive_pointsize"]:
+                    point_size = min(0.05, point_size * np.median(depth))
+            
+            rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+                rgb,
+                depth,
+                depth_scale=1.0,
+                depth_trunc=100.0,
+                convert_rgb_to_intensity=False,
             )
-            * point_size
-        )
-        scales = torch.log(torch.sqrt(dist2))[..., None]
-        if not self.isotropic:
-            scales = scales.repeat(1, 3)
 
-        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
-        rots[:, 0] = 1
-        opacities = inverse_sigmoid(
-            0.5
-            * torch.ones(
-                (fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"
+            W2C = getWorld2View2(cam.R, cam.T).cpu().numpy()
+            pcd_tmp = o3d.geometry.PointCloud.create_from_rgbd_image(
+                rgbd,
+                o3d.camera.PinholeCameraIntrinsic(
+                    cam.image_width,
+                    cam.image_height,
+                    cam.fx,
+                    cam.fy,
+                    cam.cx,
+                    cam.cy,
+                ),
+                extrinsic=W2C,
+                project_valid_depth_only=True,
             )
-        )
+            pcd_tmp = pcd_tmp.random_down_sample(1.0 / downsample_factor)
 
-        return fused_point_cloud, features, scales, rots, opacities
+            pcd_tmp.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=1.0, max_nn=1500))
+            pcd_tmp.normalize_normals()
+
+            xyz = np.asarray(pcd_tmp.points)
+            rgb_np = np.asarray(pcd_tmp.colors)
+            normals = np.asarray(pcd_tmp.normals)
+            xyz_copy = np.copy(xyz)
+
+            clusters = self.region_growing(xyz, normals)
+            planes = []  # 存储 (normal, center)
+
+            for cluster in clusters:
+                points = xyz[cluster]
+                normal, center = self.fit_plane_svd(points)
+                planes.append({
+                    "indices": cluster,
+                    "normal": normal,
+                    "center": center
+                })
+   
+            # 调整点到平面，并更新法向量
+            adjusted_xyz, adjusted_normals = self.adjust_points_to_planes(xyz, planes, normals,distance_threshold=2)
+
+            # # 创建新的点云对象
+            # pcd_adjusted = o3d.geometry.PointCloud()
+            # pcd_adjusted.points = o3d.utility.Vector3dVector(adjusted_xyz)
+            # pcd_adjusted.normals = o3d.utility.Vector3dVector(adjusted_normals)
+
+            # 可视化
+        # 使用之前和之后的点云进行可视化
+            self.visualize_before_and_after(xyz, normals, adjusted_xyz, adjusted_normals)
+    
+            # self.visualize_planes_with_normals(xyz, planes)    
+
+            # 将距离该平面较近的点投影到平面上
+            # diffs_all = xyz - center_all
+            # dists_all = np.abs(diffs_all @ normal_all)
+            # mask_all = dists_all < proj_eps
+            # xyz[mask_all] = xyz[mask_all] - np.outer((diffs_all[mask_all] @ normal_all), normal_all)
+
+            # ------------------------ 可视化对比 ------------------------
+            # self.visualize_original_and_corrected(xyz_copy, xyz, pcd_tmp, line_set)
+
+            # === 保持原逻辑 ===
+            pcd = BasicPointCloud(
+                points=adjusted_xyz, colors=rgb_np, normals=adjusted_normals
+            )
+            self.ply_input = pcd
+
+            fused_point_cloud = torch.from_numpy(np.asarray(pcd.points)).float().cuda()
+            fused_color = RGB2SH(torch.from_numpy(np.asarray(pcd.colors)).float().cuda())
+            features = (
+                torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2))
+                .float()
+                .cuda()
+            )
+            features[:, :3, 0] = fused_color
+            features[:, 3:, 1:] = 0.0
+
+            dist2 = (
+                torch.clamp_min(
+                    distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()),
+                    0.0000001,
+                )
+                * point_size
+            )
+            scales = torch.log(torch.sqrt(dist2))[..., None]
+            if not self.isotropic:
+                scales = scales.repeat(1, 3)
+
+            rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+            rots[:, 0] = 1
+            opacities = inverse_sigmoid(
+                0.5
+                * torch.ones(
+                    (fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"
+                )
+            )
+
+            return fused_point_cloud, features, scales, rots, opacities
 
     def init_lr(self, spatial_lr_scale):
         self.spatial_lr_scale = spatial_lr_scale
