@@ -94,8 +94,6 @@ class BackEnd(mp.Process):
             total_loss = torch.stack(losses).mean()
             return total_loss
 
-<<<<<<< HEAD
-=======
     # def manhattan_position_loss_on_plane(self, positions, viewpoint, eps=0.01, vertical_threshold=0.1, horizontal_threshold=0.1):
     #     device = positions.device
     #     plane_centers = torch.stack([torch.tensor(p['center'], device=device) for p in viewpoint.plane_info], dim=0)  # [P, 3]
@@ -189,8 +187,6 @@ class BackEnd(mp.Process):
     #     total_loss = torch.stack(losses).mean()
     #     return total_loss
 
-
->>>>>>> 5e87118 (plane 识别)
 
     def set_hyperparams(self):
         self.save_results = self.config["Results"]["save_results"]
@@ -351,11 +347,8 @@ class BackEnd(mp.Process):
                 loss_mapping += get_loss_mapping(
                     self.config, image, depth, viewpoint, opacity
                 ) 
-<<<<<<< HEAD
-                + self.manhattan_position_loss_on_plane(D3D_points, viewpoint)
-=======
-                # + self.manhattan_position_loss_on_plane(D3D_points, viewpoint)
->>>>>>> 5e87118 (plane 识别)
+
+             
                 # self.visualize_planar_classification(D3D_points, plane_mask)
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
                 visibility_filter_acm.append(visibility_filter)
@@ -390,11 +383,8 @@ class BackEnd(mp.Process):
                 loss_mapping += get_loss_mapping(
                     self.config, image, depth, viewpoint, opacity
                 ) 
-<<<<<<< HEAD
-                + self.manhattan_position_loss_on_plane(D3D_points, viewpoint)
-=======
-                # + self.manhattan_position_loss_on_plane(D3D_points, viewpoint)
->>>>>>> 5e87118 (plane 识别)
+
+
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
                 visibility_filter_acm.append(visibility_filter)
                 radii_acm.append(radii)

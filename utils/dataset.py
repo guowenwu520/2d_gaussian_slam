@@ -261,26 +261,16 @@ class MonocularDataset(BaseDataset):
                 "translation": np.zeros(3),
             },
         }
-<<<<<<< HEAD
-    def parse_plane_info_from_file(self,file_path):
-        planes = []
-=======
+
     def parse_plane_info_from_file(self, file_path):
         planes = []
         
         # 定义一个阈值来判断法线是否接近水平或垂直
         epsilon = 0.1  # 如果法线的分量接近 0，可以认为是水平或垂直
-
->>>>>>> 5e87118 (plane 识别)
         with open(file_path, 'r') as f:
             for line in f:
                 if not line.strip() or line.startswith("#"):
                     continue  # 跳过空行
-<<<<<<< HEAD
-=======
-
-                # 解析行数据
->>>>>>> 5e87118 (plane 识别)
                 tokens = list(map(float, line.strip().split()))
                 plane = {
                     'index': int(tokens[0]),
@@ -298,9 +288,6 @@ class MonocularDataset(BaseDataset):
                         'sxz': tokens[19],
                     }
                 }
-<<<<<<< HEAD
-                planes.append(plane)
-=======
 
                 # 判断是否接近水平或垂直
                 normal = plane['normal']
@@ -318,7 +305,6 @@ class MonocularDataset(BaseDataset):
                 # 将修改后的平面添加到列表
                 planes.append(plane)
         
->>>>>>> 5e87118 (plane 识别)
         return planes
     def __getitem__(self, idx):
         color_path = self.color_paths[idx]
