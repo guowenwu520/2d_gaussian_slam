@@ -253,6 +253,50 @@ class MonocularDataset(BaseDataset):
                 "translation": np.zeros(3),
             },
         }
+    def parse_plane_info_from_file(self, file_path):
+        planes = []
+        
+        # 定义一个阈值来判断法线是否接近水平或垂直
+        epsilon = 0.1  # 如果法线的分量接近 0，可以认为是水平或垂直
+
+        with open(file_path, 'r') as f:
+            for line in f:
+                if not line.strip() or line.startswith("#"):
+                    continue  # 跳过空行
+                tokens = list(map(float, line.strip().split()))
+                plane = {
+                    'index': int(tokens[0]),
+                    'num_points': int(tokens[1]),
+                    'color': tuple(map(int, tokens[2:5])),
+                    'normal': tuple(tokens[5:8]),
+                    'center': tuple(tokens[8:11]),
+                    'mean': tuple(tokens[11:14]),
+                    'cov': {
+                        'sxx': tokens[14],
+                        'syy': tokens[15],
+                        'szz': tokens[16],
+                        'sxy': tokens[17],
+                        'syz': tokens[18],
+                        'sxz': tokens[19],
+                    }
+                }
+                # 判断是否接近水平或垂直
+                normal = plane['normal']
+                if abs(normal[2]) < epsilon:  # 接近水平平面
+                    # 如果接近水平，调整法线为完全水平（假设水平平面的法线为 (0, 0, 1)）
+                    plane['normal'] = (0.0, 0.0, 1.0)
+                elif abs(normal[0]) < epsilon:  # 接近垂直平面
+                    # 如果接近垂直，调整法线为完全垂直（假设垂直平面的法线为 (1, 0, 0) 或 (0, 1, 0)）
+                    # 这里假设垂直平面沿 X 轴调整，可以根据需求更改为沿 Y 轴
+                    plane['normal'] = (1.0, 0.0, 0.0)
+                elif abs(normal[1]) < epsilon:  # 也可以考虑沿 Y 轴的垂直平面
+                    plane['normal'] = (0.0, 1.0, 0.0)
+                else:
+                    continue
+                # 将修改后的平面添加到列表
+                planes.append(plane)
+        
+        return planes
 
     def __getitem__(self, idx):
         color_path = self.color_paths[idx]
