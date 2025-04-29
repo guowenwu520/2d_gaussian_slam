@@ -344,11 +344,7 @@ class BackEnd(mp.Process):
                 loss_mapping += get_loss_mapping(
                     self.config, image, depth, viewpoint, opacity
                 ) 
-<<<<<<< HEAD
-=======
 
-             
->>>>>>> c97c25b (fix cla)
                 # self.visualize_planar_classification(D3D_points, plane_mask)
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
                 visibility_filter_acm.append(visibility_filter)
@@ -382,11 +378,6 @@ class BackEnd(mp.Process):
                 loss_mapping += get_loss_mapping(
                     self.config, image, depth, viewpoint, opacity
                 ) 
-<<<<<<< HEAD
-=======
-
-
->>>>>>> c97c25b (fix cla)
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
                 visibility_filter_acm.append(visibility_filter)
                 radii_acm.append(radii)
