@@ -253,12 +253,19 @@ class MonocularDataset(BaseDataset):
                 "translation": np.zeros(3),
             },
         }
+<<<<<<< HEAD
+=======
+
+>>>>>>> c97c25b (fix cla)
     def parse_plane_info_from_file(self, file_path):
         planes = []
         
         # 定义一个阈值来判断法线是否接近水平或垂直
         epsilon = 0.1  # 如果法线的分量接近 0，可以认为是水平或垂直
+<<<<<<< HEAD
 
+=======
+>>>>>>> c97c25b (fix cla)
         with open(file_path, 'r') as f:
             for line in f:
                 if not line.strip() or line.startswith("#"):
@@ -280,6 +287,10 @@ class MonocularDataset(BaseDataset):
                         'sxz': tokens[19],
                     }
                 }
+<<<<<<< HEAD
+=======
+
+>>>>>>> c97c25b (fix cla)
                 # 判断是否接近水平或垂直
                 normal = plane['normal']
                 if abs(normal[2]) < epsilon:  # 接近水平平面
