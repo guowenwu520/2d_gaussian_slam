@@ -12,7 +12,7 @@ Results:
 Dataset:
   type: 'tum'
   sensor_type: 'depth'
-  pcd_downsample: 128
+  pcd_downsample: 64
   pcd_downsample_init: 32
   adaptive_pointsize: True
   point_size: 0.01
