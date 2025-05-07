@@ -291,19 +291,19 @@ class MonocularDataset(BaseDataset):
                     }
                 }
 
-                # 判断是否接近水平或垂直
-                normal = plane['normal']
-                if abs(normal[2]) < epsilon:  # 接近水平平面
-                    # 如果接近水平，调整法线为完全水平（假设水平平面的法线为 (0, 0, 1)）
-                    plane['normal'] = (0.0, 0.0, 1.0)
-                elif abs(normal[0]) < epsilon:  # 接近垂直平面
-                    # 如果接近垂直，调整法线为完全垂直（假设垂直平面的法线为 (1, 0, 0) 或 (0, 1, 0)）
-                    # 这里假设垂直平面沿 X 轴调整，可以根据需求更改为沿 Y 轴
-                    plane['normal'] = (1.0, 0.0, 0.0)
-                elif abs(normal[1]) < epsilon:  # 也可以考虑沿 Y 轴的垂直平面
-                    plane['normal'] = (0.0, 1.0, 0.0)
-                else:
-                    continue
+                # # 判断是否接近水平或垂直
+                # normal = plane['normal']
+                # if abs(normal[2]) < epsilon:  # 接近水平平面
+                #     # 如果接近水平，调整法线为完全水平（假设水平平面的法线为 (0, 0, 1)）
+                #     plane['normal'] = (0.0, 0.0, 1.0)
+                # elif abs(normal[0]) < epsilon:  # 接近垂直平面
+                #     # 如果接近垂直，调整法线为完全垂直（假设垂直平面的法线为 (1, 0, 0) 或 (0, 1, 0)）
+                #     # 这里假设垂直平面沿 X 轴调整，可以根据需求更改为沿 Y 轴
+                #     plane['normal'] = (1.0, 0.0, 0.0)
+                # elif abs(normal[1]) < epsilon:  # 也可以考虑沿 Y 轴的垂直平面
+                #     plane['normal'] = (0.0, 1.0, 0.0)
+                # else:
+                #     continue
                 # 将修改后的平面添加到列表
                 planes.append(plane)
         

@@ -11,6 +11,7 @@ from utils.logging_utils import Log
 from utils.multiprocessing_utils import clone_obj
 from utils.pose_utils import update_pose
 from utils.slam_utils import get_loss_mapping
+from utils.manhattan_voxelgrid import ManHattanVoxelGrid
 
 
 class BackEnd(mp.Process):
@@ -37,6 +38,7 @@ class BackEnd(mp.Process):
         self.current_window = []
         self.initialized = not self.monocular
         self.keyframe_optimizers = None
+        self.manhattan_voxel=ManHattanVoxelGrid(0.01)
     
   
     def manhattan_position_loss_on_plane(self,positions, viewpoint, eps=0.01):
@@ -560,6 +562,8 @@ class BackEnd(mp.Process):
                         cur_frame_idx, viewpoint, depth_map=depth_map, init=True
                     )
                     self.initialize_map(cur_frame_idx, viewpoint)
+                    cpu_tensor_dict = self.gaussians.gather_gaussians_to_cpu()
+                    self.manhattan_voxel.build(cpu_tensor_dict)
                     self.push_to_frontend("init")
 
                 elif data[0] == "keyframe":
@@ -628,6 +632,13 @@ class BackEnd(mp.Process):
 
                     self.map(self.current_window, iters=iter_per_kf)
                     self.map(self.current_window, prune=True)
+                    cpu_tensor_dict = self.gaussians.gather_gaussians_to_cpu()
+                    self.manhattan_voxel.build(cpu_tensor_dict)
+                    voxel_data = self.manhattan_voxel.get_all_voxel_data()
+                    for key, entry_list in voxel_data.items():
+                        print(f"Voxel {key} contains {len(entry_list)} entries")
+                        # for i, entry in enumerate(entry_list):
+                        #     print(f"  Entry {i}: xyz={entry['xyz']}, opacity={entry['opacity']}")
                     self.push_to_frontend("keyframe")
                 else:
                     raise Exception("Unprocessed data", data)

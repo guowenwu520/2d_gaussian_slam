@@ -71,6 +71,15 @@ class GaussianModel:
 
         self.isotropic = False
         #----------------
+    def gather_gaussians_to_cpu(self):
+        return {
+            "xyz": self._xyz,
+            "f_dc": self._features_dc,
+            "f_rest": self._features_rest,
+            "scaling": self._scaling,
+            "rotation": self._rotation,
+            "opacity": self._opacity,
+        }
 
     def build_covariance_from_scaling_rotation(
         self, scaling, scaling_modifier, rotation
@@ -274,27 +283,68 @@ class GaussianModel:
             plane_centers_world (torch.Tensor): [P, 3]
             plane_normals_world (torch.Tensor): [P, 3]
         """
-        if isinstance(R, np.ndarray):
-            R = torch.from_numpy(R).to(dtype=torch.float32, device=plane_centers_cam.device)
-        else:
-            R = R.to(dtype=torch.float32, device=plane_centers_cam.device)
+        # if isinstance(R, np.ndarray):
+        #     R = torch.from_numpy(R).to(dtype=torch.float32, device=plane_centers_cam.device)
+        # else:
+        #     R = R.to(dtype=torch.float32, device=plane_centers_cam.device)
 
-        if isinstance(T, np.ndarray):
-            T = torch.from_numpy(T).to(dtype=torch.float32, device=plane_centers_cam.device)
-        else:
-            T = T.to(dtype=torch.float32, device=plane_centers_cam.device)
+        # if isinstance(T, np.ndarray):
+        #     T = torch.from_numpy(T).to(dtype=torch.float32, device=plane_centers_cam.device)
+        # else:
+        #     T = T.to(dtype=torch.float32, device=plane_centers_cam.device)
 
 
-        # 世界到相机 -> 相机到世界： x_world = Rᵀ @ (x_cam - T)
-        R_t = R.transpose(0, 1)  # Rᵀ
-        centers_translated = plane_centers_cam - T  # [P, 3]
-        plane_centers_world = (R_t @ centers_translated.T).T
+        # # 世界到相机 -> 相机到世界： x_world = Rᵀ @ (x_cam - T)
+        # R_t = R.transpose(0, 1)  # Rᵀ
+        # centers_translated = plane_centers_cam - T  # [P, 3]
+        # plane_centers_world = (R_t @ centers_translated.T).T
 
-        # 法向量只需旋转
-        plane_normals_world = (R_t @ plane_normals_cam.T).T
-        plane_normals_world = torch.nn.functional.normalize(plane_normals_world, dim=1)
+        # # 法向量只需旋转
+        # plane_normals_world = (R_t @ plane_normals_cam.T).T
+        # plane_normals_world = torch.nn.functional.normalize(plane_normals_world, dim=1)
+        # return plane_centers_world, plane_normals_world
+        x = plane_centers_cam[:, 0]
+        y = plane_centers_cam[:, 1]
+        z = plane_centers_cam[:, 2]
+        transformed_centers = torch.stack([z, -y, x], dim=1)
 
-        return plane_centers_world, plane_normals_world
+        x = plane_normals_cam[:, 0]
+        y = plane_normals_cam[:, 1]
+        z = plane_normals_cam[:, 2]
+        transformed_normals = torch.stack([z, -y, x], dim=1)
+        return transformed_centers, transformed_normals
+    def rotate_planes_to_z(self,centers, normals):
+        # 目标法向量
+        target = torch.tensor([0, 0, 1], dtype=torch.float32, device=normals.device).expand_as(normals)
+        normals = torch.nn.functional.normalize(normals, dim=-1)
+
+        # 旋转轴：法向量和目标向量的叉乘
+        axis = torch.cross(normals, target, dim=1)
+        axis_norm = torch.norm(axis, dim=1, keepdim=True)
+        axis = axis / (axis_norm + 1e-8)
+
+        # 角度
+        cos = torch.clamp(torch.sum(normals * target, dim=1), -1.0, 1.0)
+        angle = torch.acos(cos)
+
+        # Rodrigues 旋转公式
+        K = torch.zeros((centers.shape[0], 3, 3), device=normals.device)
+        K[:, 0, 1] = -axis[:, 2]
+        K[:, 0, 2] = axis[:, 1]
+        K[:, 1, 0] = axis[:, 2]
+        K[:, 1, 2] = -axis[:, 0]
+        K[:, 2, 0] = -axis[:, 1]
+        K[:, 2, 1] = axis[:, 0]
+
+        I = torch.eye(3, device=normals.device).expand(centers.shape[0], 3, 3)
+        angle = angle.view(-1, 1, 1)
+        R = I + torch.sin(angle) * K + (1 - torch.cos(angle)) * (K @ K)
+
+        # 旋转所有平面中心
+        centers_rot = torch.bmm(R, centers.unsqueeze(-1)).squeeze(-1)
+        normals_rot = torch.bmm(R, normals.unsqueeze(-1)).squeeze(-1)
+
+        return centers_rot, normals_rot
 
     def create_pcd_from_image_and_depth(self, cam, rgb, depth, init=False):
             if init:
@@ -315,6 +365,7 @@ class GaussianModel:
             )
 
             W2C = getWorld2View2(cam.R, cam.T).cpu().numpy()
+            # print("W2C" ,rgbd.shape)
             pcd_tmp = o3d.geometry.PointCloud.create_from_rgbd_image(
                 rgbd,
                 o3d.camera.PinholeCameraIntrinsic(
@@ -337,81 +388,85 @@ class GaussianModel:
             rgb_np = np.asarray(pcd_tmp.colors)
             normals = np.asarray(pcd_tmp.normals)
 
-            plane_centers = torch.stack([torch.tensor(p['center'], device='cuda') for p in cam.plane_info], dim=0)  # [P, 3]
-            plane_normals = torch.stack([torch.tensor(p['normal'], device='cuda') for p in cam.plane_info], dim=0)  # [P, 3]
-            plane_centers_world, plane_normals_world = self.transform_planes_to_world(plane_centers, plane_normals, cam.R, cam.T)
+            # plane_centers = torch.stack([torch.tensor(p['center'], device='cuda') for p in cam.plane_info], dim=0)  # [P, 3]
+            # plane_normals = torch.stack([torch.tensor(p['normal'], device='cuda') for p in cam.plane_info], dim=0)  # [P, 3]
+            # plane_colors = torch.stack([torch.tensor(p['color'], device='cuda') for p in cam.plane_info],dim=0).float() / 255.0  # [P, 3]
             
-            # 将点云转换为 Open3D 格式
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(xyz)
-            pcd.colors = o3d.utility.Vector3dVector(rgb_np)
-            pcd.normals = o3d.utility.Vector3dVector(normals)
+            # # plane_centers_cam, plane_normals_cam = self.rotate_planes_to_z(plane_centers, plane_normals)
+            # plane_centers, plane_normals = self.transform_planes_to_world(plane_centers, plane_normals, cam.R, cam.T)
+            # coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0, 0, 0])
+            # # 将点云转换为 Open3D 格式
+            # pcd = o3d.geometry.PointCloud()
+            # pcd.points = o3d.utility.Vector3dVector(xyz)
+            # pcd.colors = o3d.utility.Vector3dVector(rgb_np)
+            # pcd.normals = o3d.utility.Vector3dVector(normals)
+            # # 创建一个 Open3D 可视化器
+            # vis = o3d.visualization.Visualizer()
+            # vis.create_window()
 
-            # 创建一个 Open3D 可视化器
-            vis = o3d.visualization.Visualizer()
-            vis.create_window()
+            # vis.add_geometry(coord_frame)
+            # # 添加点云到可视化器
+            # vis.add_geometry(pcd)
 
-            # 添加点云到可视化器
-            vis.add_geometry(pcd)
+            # # 创建平面并添加到可视化器
+            # for i in range(len(plane_centers)):
+            #     # 平面中心和法向量
+            #     plane_center = plane_centers[i].cpu().numpy()
+            #     plane_normal = plane_normals[i].cpu().numpy()
 
-            # 创建平面并添加到可视化器
-            for i in range(len(plane_centers_world)):
-                # 平面中心和法向量
-                plane_center = plane_centers_world[i].cpu().numpy()
-                plane_normal = plane_normals_world[i].cpu().numpy()
+            # # 计算平面到原点的距离（点到平面的距离公式）
+            #     plane_distance_to_origin = np.abs(np.dot(plane_center, plane_normal)) / np.linalg.norm(plane_normal)
+            #     print(f"平面 {i+1} 到原点的距离: {plane_distance_to_origin:.4f} {plane_center} {plane_normal}")
+            #     # 定义平面的四个顶点
+            #     d = 1.0  # 平面边长
+            #     half_d = d / 2.0
 
-            # 计算平面到原点的距离（点到平面的距离公式）
-                plane_distance_to_origin = np.abs(np.dot(plane_center, plane_normal)) / np.linalg.norm(plane_normal)
-                print(f"平面 {i+1} 到原点的距离: {plane_distance_to_origin:.4f}")
-                # 定义平面的四个顶点
-                d = 1.0  # 平面边长
-                half_d = d / 2.0
+            #     # 四个顶点，围绕平面中心
+            #     vertices = np.array([
+            #         [half_d, half_d, 0],  # 顶点1
+            #         [half_d, -half_d, 0], # 顶点2
+            #         [-half_d, -half_d, 0], # 顶点3
+            #         [-half_d, half_d, 0]   # 顶点4
+            #     ])
 
-                # 四个顶点，围绕平面中心
-                vertices = np.array([
-                    [half_d, half_d, 0],  # 顶点1
-                    [half_d, -half_d, 0], # 顶点2
-                    [-half_d, -half_d, 0], # 顶点3
-                    [-half_d, half_d, 0]   # 顶点4
-                ])
+            #     # 创建面，定义每个面由三个顶点组成
+            #     faces = np.array([
+            #         [0, 1, 2],
+            #         [0, 2, 3]
+            #     ])
 
-                # 创建面，定义每个面由三个顶点组成
-                faces = np.array([
-                    [0, 1, 2],
-                    [0, 2, 3]
-                ])
+            #     # 创建平面网格
+            #     plane = o3d.geometry.TriangleMesh()
 
-                # 创建平面网格
-                plane = o3d.geometry.TriangleMesh()
+            #     # 设置平面顶点和面
+            #     plane.vertices = o3d.utility.Vector3dVector(vertices)
+            #     plane.triangles = o3d.utility.Vector3iVector(faces)
 
-                # 设置平面顶点和面
-                plane.vertices = o3d.utility.Vector3dVector(vertices)
-                plane.triangles = o3d.utility.Vector3iVector(faces)
+            #     # 根据法向量旋转平面
+            #     rotation_matrix = o3d.geometry.get_rotation_matrix_from_xyz(np.arccos(plane_normal))
+            #     plane.rotate(rotation_matrix, center=plane_center)
 
-                # 根据法向量旋转平面
-                rotation_matrix = o3d.geometry.get_rotation_matrix_from_xyz(np.arccos(plane_normal))
-                plane.rotate(rotation_matrix, center=plane_center)
+            #     # 平面平移到正确的位置
+            #     plane.translate(plane_center) 
+            #     print(plane_colors[i].cpu().numpy())
+            #     plane.paint_uniform_color(plane_colors[i].cpu().numpy()) 
 
-                # 平面平移到正确的位置
-                plane.translate(plane_center) 
-                plane.paint_uniform_color([1, 0, 0]) 
-
-                # 添加平面到可视化器
-                vis.add_geometry(plane)
-                 # 计算并检查点到原点的距离
-                for j in range(len(xyz)):
-                    point = xyz[j]
-                    # 计算点到原点的距离
-                    point_distance_to_origin = np.linalg.norm(point)
-                    print(f"点 {j+1} 到原点的距离: {point_distance_to_origin:.4f}")
+            #     # 添加平面到可视化器
+            #     vis.add_geometry(plane)
+            #      # 计算并检查点到原点的距离
+            #     for j in range(len(xyz)):
+            #         point = xyz[j]
+            #         # 计算点到原点的距离
+            #         point_distance_to_origin = np.linalg.norm(point)
+            #         # print(f"点 {j+1} 到原点的距离: {point_distance_to_origin:.4f}")
               
-                    # 检查点到原点的距离是否等于平面到原点的距离
-                    if np.isclose(point_distance_to_origin, plane_distance_to_origin, atol=1e-3):  # 设定一个容忍误差
-                        print(f"点 {j+1} 到原点的距离 ({point_distance_to_origin:.4f}) 等于平面 {i+1} 到原点的距离")
+            #         # 检查点到原点的距离是否等于平面到原点的距离
+            #         if np.isclose(point_distance_to_origin, plane_distance_to_origin, atol=1e-3):  # 设定一个容忍误差
+            #             print(f"点 {j+1} 到原点的距离 ({point_distance_to_origin:.4f}) 等于平面 {i+1} 到原点的距离")
 
 
-            # 启动可视化
-            vis.run()
+            # # 启动可视化
+            # vis.run()
         
             # === 保持原逻辑 ===
             pcd = BasicPointCloud(
@@ -829,14 +884,14 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
-      
+        
         with torch.no_grad():  # 不追踪计算图，避免 autograd 报错
             log_scaling = self._scaling
             scaling = torch.exp(log_scaling)
             min_scaling_idx = torch.argmin(scaling, dim=1)
 
             new_log_scaling = log_scaling.clone()
-            new_log_scaling[torch.arange(new_log_scaling.size(0)), min_scaling_idx] -= 0.01
+            new_log_scaling[torch.arange(new_log_scaling.size(0)), min_scaling_idx] -= 0.001
 
             self._scaling.data.copy_(new_log_scaling)
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
