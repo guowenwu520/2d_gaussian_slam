@@ -74,6 +74,7 @@ def render(
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
     means3D = pc.get_xyz
+    labels = pc.get_labels
     means2D = screenspace_points
     opacity = pc.get_opacity
 
@@ -153,5 +154,6 @@ def render(
         "depth": depth,
         "opacity": opacity,
         "n_touched": n_touched,
-        "3d_points": means3D
+        "3d_points": means3D,
+        "labels":labels,
     }

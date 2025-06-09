@@ -46,6 +46,7 @@ class GaussianModel:
         self._scaling = torch.empty(0, device="cuda")
         self._rotation = torch.empty(0, device="cuda")
         self._opacity = torch.empty(0, device="cuda")
+        self._point_labels = torch.empty(0, device="cuda")
         self.max_radii2D = torch.empty(0, device="cuda")
         self.xyz_gradient_accum = torch.empty(0, device="cuda")
 
@@ -79,6 +80,7 @@ class GaussianModel:
             "scaling": self._scaling,
             "rotation": self._rotation,
             "opacity": self._opacity,
+            "labels": self._point_labels,
         }
 
     def build_covariance_from_scaling_rotation(
@@ -100,6 +102,10 @@ class GaussianModel:
     @property
     def get_xyz(self):
         return self._xyz
+    
+    @property
+    def get_labels(self):
+        return self._point_labels
 
     @property
     def get_features(self):
@@ -346,6 +352,89 @@ class GaussianModel:
 
         return centers_rot, normals_rot
 
+
+    def assign_plane_labels_to_open3d_points(self, xyz, cam_intrinsics, label_data, invalid_mask, w2c):
+        # return np.full((xyz.shape[0],), -1, dtype=np.int32) 
+        """
+        给 Open3D 点云中的每个点分配图像平面标签（支持世界坐标 → 像素投影）。
+        """
+        try:
+            # === 1. 世界坐标 → 齐次相机坐标 ===
+            N = xyz.shape[0]
+            xyz_h = np.concatenate([xyz, np.ones((N, 1))], axis=1).T  # [4, N]
+            cam_xyz_h = (w2c @ xyz_h).T  # [N, 4]
+            cam_xyz = cam_xyz_h[:, :3]
+            x, y, z = cam_xyz[:, 0], cam_xyz[:, 1], cam_xyz[:, 2]
+
+            # === 2. 相机坐标 → 图像像素 ===
+            u = np.round((x * cam_intrinsics.fx) / z + cam_intrinsics.cx).astype(int)
+            v = np.round((y * cam_intrinsics.fy) / z + cam_intrinsics.cy).astype(int)
+
+            # === 3. 投影合法性检查 ===
+            valid = (u >= 0) & (u < cam_intrinsics.image_width) & \
+                    (v >= 0) & (v < cam_intrinsics.image_height) & (z > 0)
+            point_plane_labels = np.full((N,), -1, dtype=np.int32)
+
+            # === 4. 提取标签 ===
+            u_valid = u[valid]
+            v_valid = v[valid]
+
+            # 检查 label_data 和 invalid_mask 是否为二维
+            # assert label_data.ndim == 2, f"label_data should be 2D but got shape {label_data.shape}"
+            # assert invalid_mask.ndim == 2, f"invalid_mask should be 2D but got shape {invalid_mask.shape}"
+
+            labels = label_data[v_valid, u_valid]
+            invalid = invalid_mask[v_valid, u_valid]
+            labels[invalid] = -1
+
+            point_plane_labels[valid] = labels
+
+            return point_plane_labels
+
+        except Exception as e:
+            print("[assign_plane_labels_to_open3d_points] 错误:", str(e))
+            import traceback
+            traceback.print_exc()
+            return np.full((xyz.shape[0],), -1, dtype=np.int32)  # 返回全部为 -1，表示失败
+
+
+
+    def visualize_point_cloud_with_labels(self,xyz, point_plane_labels):
+        """
+        根据标签给点云着色并显示。
+
+        参数：
+            xyz (np.ndarray): 点云坐标 [N, 3]
+            point_plane_labels (np.ndarray): 点对应的平面标签 [N]，-1 表示无标签
+        """
+
+        # 创建 Open3D 点云对象
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(xyz)
+
+        labels = point_plane_labels
+        unique_labels = np.unique(labels)
+        # 排除-1
+        unique_labels = unique_labels[unique_labels != -1]
+
+        # 用 matplotlib 取 N 个不同颜色
+        cmap = plt.get_cmap("tab20")
+        colors = np.zeros((len(labels), 3))
+
+        for i, label in enumerate(unique_labels):
+            mask = labels == label
+            color = cmap(i % 20)[:3]  # RGB 三通道
+            colors[mask] = color
+
+        # 给没有标签的点涂灰色
+        colors[labels == -1] = np.array([0.5, 0.5, 0.5])
+
+        pcd.colors = o3d.utility.Vector3dVector(colors)
+
+        # 可视化
+        o3d.visualization.draw_geometries([pcd])
+
+
     def create_pcd_from_image_and_depth(self, cam, rgb, depth, init=False):
             if init:
                 downsample_factor = self.config["Dataset"]["pcd_downsample_init"]
@@ -387,93 +476,18 @@ class GaussianModel:
             xyz = np.asarray(pcd_tmp.points)
             rgb_np = np.asarray(pcd_tmp.colors)
             normals = np.asarray(pcd_tmp.normals)
-
-            # plane_centers = torch.stack([torch.tensor(p['center'], device='cuda') for p in cam.plane_info], dim=0)  # [P, 3]
-            # plane_normals = torch.stack([torch.tensor(p['normal'], device='cuda') for p in cam.plane_info], dim=0)  # [P, 3]
-            # plane_colors = torch.stack([torch.tensor(p['color'], device='cuda') for p in cam.plane_info],dim=0).float() / 255.0  # [P, 3]
-            
-            # # plane_centers_cam, plane_normals_cam = self.rotate_planes_to_z(plane_centers, plane_normals)
-            # plane_centers, plane_normals = self.transform_planes_to_world(plane_centers, plane_normals, cam.R, cam.T)
-            # coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0, 0, 0])
-            # # 将点云转换为 Open3D 格式
-            # pcd = o3d.geometry.PointCloud()
-            # pcd.points = o3d.utility.Vector3dVector(xyz)
-            # pcd.colors = o3d.utility.Vector3dVector(rgb_np)
-            # pcd.normals = o3d.utility.Vector3dVector(normals)
-            # # 创建一个 Open3D 可视化器
-            # vis = o3d.visualization.Visualizer()
-            # vis.create_window()
-
-            # vis.add_geometry(coord_frame)
-            # # 添加点云到可视化器
-            # vis.add_geometry(pcd)
-
-            # # 创建平面并添加到可视化器
-            # for i in range(len(plane_centers)):
-            #     # 平面中心和法向量
-            #     plane_center = plane_centers[i].cpu().numpy()
-            #     plane_normal = plane_normals[i].cpu().numpy()
-
-            # # 计算平面到原点的距离（点到平面的距离公式）
-            #     plane_distance_to_origin = np.abs(np.dot(plane_center, plane_normal)) / np.linalg.norm(plane_normal)
-            #     print(f"平面 {i+1} 到原点的距离: {plane_distance_to_origin:.4f} {plane_center} {plane_normal}")
-            #     # 定义平面的四个顶点
-            #     d = 1.0  # 平面边长
-            #     half_d = d / 2.0
-
-            #     # 四个顶点，围绕平面中心
-            #     vertices = np.array([
-            #         [half_d, half_d, 0],  # 顶点1
-            #         [half_d, -half_d, 0], # 顶点2
-            #         [-half_d, -half_d, 0], # 顶点3
-            #         [-half_d, half_d, 0]   # 顶点4
-            #     ])
-
-            #     # 创建面，定义每个面由三个顶点组成
-            #     faces = np.array([
-            #         [0, 1, 2],
-            #         [0, 2, 3]
-            #     ])
-
-            #     # 创建平面网格
-            #     plane = o3d.geometry.TriangleMesh()
-
-            #     # 设置平面顶点和面
-            #     plane.vertices = o3d.utility.Vector3dVector(vertices)
-            #     plane.triangles = o3d.utility.Vector3iVector(faces)
-
-            #     # 根据法向量旋转平面
-            #     rotation_matrix = o3d.geometry.get_rotation_matrix_from_xyz(np.arccos(plane_normal))
-            #     plane.rotate(rotation_matrix, center=plane_center)
-
-            #     # 平面平移到正确的位置
-            #     plane.translate(plane_center) 
-            #     print(plane_colors[i].cpu().numpy())
-            #     plane.paint_uniform_color(plane_colors[i].cpu().numpy()) 
-
-            #     # 添加平面到可视化器
-            #     vis.add_geometry(plane)
-            #      # 计算并检查点到原点的距离
-            #     for j in range(len(xyz)):
-            #         point = xyz[j]
-            #         # 计算点到原点的距离
-            #         point_distance_to_origin = np.linalg.norm(point)
-            #         # print(f"点 {j+1} 到原点的距离: {point_distance_to_origin:.4f}")
-              
-            #         # 检查点到原点的距离是否等于平面到原点的距离
-            #         if np.isclose(point_distance_to_origin, plane_distance_to_origin, atol=1e-3):  # 设定一个容忍误差
-            #             print(f"点 {j+1} 到原点的距离 ({point_distance_to_origin:.4f}) 等于平面 {i+1} 到原点的距离")
-
-
-            # # 启动可视化
-            # vis.run()
-        
+            label_np_list = cam.plane_info['label_data']
+            invalid_mask_array_list = cam.plane_info['invalid_mask']
+            point_plane_labels = self.assign_plane_labels_to_open3d_points(xyz,cam, label_np_list, invalid_mask_array_list,W2C)
+            print(point_plane_labels.shape,xyz.shape)
             # === 保持原逻辑 ===
             pcd = BasicPointCloud(
                 points=xyz, colors=rgb_np, normals=normals
             )
             self.ply_input = pcd
 
+            self.visualize_point_cloud_with_labels(xyz, point_plane_labels)
+            point_plane_labels = torch.from_numpy(point_plane_labels).float().cuda()
             fused_point_cloud = torch.from_numpy(np.asarray(pcd.points)).float().cuda()
             fused_color = RGB2SH(torch.from_numpy(np.asarray(pcd.colors)).float().cuda())
             features = (
@@ -504,13 +518,13 @@ class GaussianModel:
                 )
             )
 
-            return fused_point_cloud, features, scales, rots, opacities
+            return fused_point_cloud, features, scales, rots, opacities,point_plane_labels
 
     def init_lr(self, spatial_lr_scale):
         self.spatial_lr_scale = spatial_lr_scale
 
     def extend_from_pcd(
-        self, fused_point_cloud, features, scales, rots, opacities, kf_id
+        self, fused_point_cloud, features, scales, rots, opacities, kf_id,point_plane_labels
     ):
         new_xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         new_features_dc = nn.Parameter(
@@ -522,6 +536,7 @@ class GaussianModel:
         new_scaling = nn.Parameter(scales.requires_grad_(True))
         new_rotation = nn.Parameter(rots.requires_grad_(True))
         new_opacity = nn.Parameter(opacities.requires_grad_(True))
+        new_points_label = nn.Parameter(point_plane_labels.requires_grad_(True))
 
         new_unique_kfIDs = torch.ones((new_xyz.shape[0])).int() * kf_id
         new_n_obs = torch.zeros((new_xyz.shape[0])).int()
@@ -534,16 +549,17 @@ class GaussianModel:
             new_rotation,
             new_kf_ids=new_unique_kfIDs,
             new_n_obs=new_n_obs,
+            new_points_label = new_points_label
         )
 
     def extend_from_pcd_seq(
         self, cam_info, kf_id=-1, init=False, scale=2.0, depthmap=None
     ):
-        fused_point_cloud, features, scales, rots, opacities = (
+        fused_point_cloud, features, scales, rots, opacities,point_plane_labels = (
             self.create_pcd_from_image(cam_info, init, scale=scale, depthmap=depthmap)
         )
         self.extend_from_pcd(
-            fused_point_cloud, features, scales, rots, opacities, kf_id
+            fused_point_cloud, features, scales, rots, opacities, kf_id,point_plane_labels
         )
 
     def training_setup(self, training_args):
@@ -581,6 +597,11 @@ class GaussianModel:
                 "params": [self._rotation],
                 "lr": training_args.rotation_lr,
                 "name": "rotation",
+            },
+            {
+                "params": [self._point_labels],
+                "lr": training_args.labels_lr,
+                "name": "labels",
             },
         ]
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
@@ -813,6 +834,7 @@ class GaussianModel:
         self._features_dc = optimizable_tensors["f_dc"]
         self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
+        self._point_labels = optimizable_tensors["labels"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
@@ -867,6 +889,7 @@ class GaussianModel:
         new_rotation,
         new_kf_ids=None,
         new_n_obs=None,
+        new_points_label=None
     ):
         d = {
             "xyz": new_xyz,
@@ -875,6 +898,7 @@ class GaussianModel:
             "opacity": new_opacities,
             "scaling": new_scaling,
             "rotation": new_rotation,
+            "labels":new_points_label,
         }
 
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
@@ -884,6 +908,7 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
+        self._point_labels = optimizable_tensors["labels"]
         
         with torch.no_grad():  # 不追踪计算图，避免 autograd 报错
             log_scaling = self._scaling
@@ -929,6 +954,8 @@ class GaussianModel:
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N, 1, 1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N, 1)
 
+        new_points_label = self._point_labels[selected_pts_mask].repeat(N)
+
         new_kf_id = self.unique_kfIDs[selected_pts_mask.cpu()].repeat(N)
         new_n_obs = self.n_obs[selected_pts_mask.cpu()].repeat(N)
 
@@ -941,6 +968,7 @@ class GaussianModel:
             new_rotation,
             new_kf_ids=new_kf_id,
             new_n_obs=new_n_obs,
+            new_points_label=new_points_label,
         )
 
         prune_filter = torch.cat(
@@ -970,6 +998,8 @@ class GaussianModel:
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
 
+        new_points_label = self._point_labels[selected_pts_mask]
+
         new_kf_id = self.unique_kfIDs[selected_pts_mask.cpu()]
         new_n_obs = self.n_obs[selected_pts_mask.cpu()]
         self.densification_postfix(
@@ -981,6 +1011,7 @@ class GaussianModel:
             new_rotation,
             new_kf_ids=new_kf_id,
             new_n_obs=new_n_obs,
+            new_points_label=new_points_label,
         )
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):

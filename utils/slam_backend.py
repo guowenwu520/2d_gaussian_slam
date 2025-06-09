@@ -1,9 +1,13 @@
 import random
 import time
 
+from matplotlib import pyplot as plt
+import numpy as np
+
 import torch
 import torch.multiprocessing as mp
 from tqdm import tqdm
+import open3d as o3d
 
 from gaussian_splatting.gaussian_renderer import render
 from gaussian_splatting.utils.loss_utils import l1_loss, ssim
@@ -38,7 +42,7 @@ class BackEnd(mp.Process):
         self.current_window = []
         self.initialized = not self.monocular
         self.keyframe_optimizers = None
-        self.manhattan_voxel=ManHattanVoxelGrid(0.01)
+        # self.manhattan_voxel=ManHattanVoxelGrid(0.01)
     
   
     def manhattan_position_loss_on_plane(self,positions, viewpoint, eps=0.01):
@@ -247,6 +251,7 @@ class BackEnd(mp.Process):
                 opacity,
                 n_touched,
                 D3D_points,
+                labes,
             ) = (
                 render_pkg["render"],
                 render_pkg["viewspace_points"],
@@ -256,10 +261,12 @@ class BackEnd(mp.Process):
                 render_pkg["opacity"],
                 render_pkg["n_touched"],
                 render_pkg["3d_points"],
+                render_pkg["labels"],
             )
             loss_init = get_loss_mapping(
                 self.config, image, depth, viewpoint, opacity, initialization=True
             )
+            # +self.compute_projection_loss(D3D_points, labes)
             loss_init.backward()
 
             with torch.no_grad():
@@ -289,7 +296,114 @@ class BackEnd(mp.Process):
         self.occ_aware_visibility[cur_frame_idx] = (n_touched > 0).long()
         Log("Initialized map")
         return render_pkg
-    
+    # [0,4,6,3,5,2]
+    def visualize_point_cloud_with_labels(self, xyz, point_plane_labels, visible_labels=None):
+        # 固定颜色名 → RGB 值
+        fixed_color_map = {
+            "蓝色": (0.121, 0.466, 0.705),
+            "橙色": (1.000, 0.498, 0.054),
+            "绿色": (0.172, 0.627, 0.172),
+            "红色": (0.839, 0.153, 0.157),
+            "紫色": (0.580, 0.404, 0.741),
+            "棕色": (0.549, 0.337, 0.294),
+            "粉色": (0.890, 0.466, 0.760),
+            "灰色": (0.498, 0.498, 0.498),
+            "黄绿色": (0.737, 0.741, 0.133),
+            "青色": (0.090, 0.745, 0.811),
+            "深蓝": (0.0, 0.2, 0.4),
+            "浅橙": (1.0, 0.7, 0.4),
+            "浅绿": (0.6, 0.9, 0.6),
+            "深红": (0.6, 0.1, 0.1),
+            "浅紫": (0.75, 0.6, 0.9),
+            "浅棕": (0.8, 0.7, 0.5),
+            "浅粉": (1.0, 0.8, 0.9),
+            "深灰": (0.3, 0.3, 0.3),
+            "亮黄绿": (0.6, 0.8, 0.2),
+            "亮青": (0.4, 1.0, 1.0)
+        }
+
+        label_to_color_name = {
+            idx: name for idx, name in enumerate(fixed_color_map.keys())
+        }
+
+        # 初始化点云
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(xyz)
+
+        labels = point_plane_labels
+        colors = np.zeros((len(labels), 3))
+        gray = np.array([0.5, 0.5, 0.5])
+
+        unique_labels = np.unique(labels)
+        unique_labels = unique_labels[unique_labels != -1]
+
+        for label in unique_labels:
+            mask = labels == label
+            color_name = label_to_color_name.get(label, None)
+
+            if visible_labels is not None and label not in visible_labels:
+                colors[mask] = gray
+            elif color_name and color_name in fixed_color_map:
+                rgb = fixed_color_map[color_name]
+                colors[mask] = rgb
+                print(f"标签 {label} 的颜色是：{color_name}，RGB值为：{rgb}")
+            else:
+                colors[mask] = gray  # 超出范围或无定义
+
+        # 标签 -1 设置为灰色
+        colors[labels == -1] = gray
+        pcd.colors = o3d.utility.Vector3dVector(colors)
+
+        # 显示
+        o3d.visualization.draw_geometries([pcd])
+
+
+    def fit_plane(self, points):
+        """
+        最小二乘法拟合平面（使用 PyTorch 实现，支持 GPU）
+        返回: 平面中心点 + 法向量
+        """
+        centroid = points.mean(dim=0, keepdim=True)
+        centered = points - centroid
+        cov = centered.T @ centered / (points.shape[0] - 1)
+        _, _, V = torch.linalg.svd(cov)
+        normal = V[-1]
+        return centroid.squeeze(0), normal
+
+    def project_to_plane(self, points, plane_point, plane_normal):
+        """
+        将点投影到平面（使用 PyTorch 实现，支持 GPU）
+        """
+        vec = points - plane_point  # [N, 3]
+        dist = torch.sum(vec * plane_normal, dim=-1, keepdim=True)  # [N, 1]
+        proj = points - dist * plane_normal  # [N, 3]
+        return proj, dist.squeeze(-1)
+
+    def compute_projection_loss(self, D3D_points, labels):
+        # return torch.tensor(0.0, device=D3D_points.device)
+        unique_labels = torch.unique(labels)
+
+        loss_list = []
+
+        for label in unique_labels:
+            if label.item() == -1:
+                continue
+            mask = labels == label
+            pts = D3D_points[mask]
+            if pts.shape[0] > 1000:
+                continue  # 无法拟合平面
+
+            # print("pts.shape:", pts.shape[0])
+            plane_pt, plane_normal = self.fit_plane(pts)
+            proj_pts, dists = self.project_to_plane(pts, plane_pt, plane_normal)
+            loss = (dists ** 2).mean()
+            loss_list.append(loss)
+
+        if len(loss_list) == 0:
+            return torch.tensor(0.0, device=D3D_points.device)
+        
+        return torch.stack(loss_list).mean()
+
 
     def map(self, current_window, prune=False, iters=1):
         if len(current_window) == 0:
@@ -332,6 +446,7 @@ class BackEnd(mp.Process):
                     opacity,
                     n_touched,
                     D3D_points,
+                    labes,
                 ) = (
                     render_pkg["render"],
                     render_pkg["viewspace_points"],
@@ -341,11 +456,20 @@ class BackEnd(mp.Process):
                     render_pkg["opacity"],
                     render_pkg["n_touched"],
                     render_pkg["3d_points"],
+                    render_pkg["labels"],
                 )
-
+                if isinstance(D3D_points, torch.Tensor):
+                    D3D_points = D3D_points.detach().cpu().numpy()
+                if isinstance(labes, torch.Tensor):
+                    labes = labes.detach().cpu().numpy()
+                labes = np.asarray(labes).astype(np.int32)
+                D3D_points = np.asarray(D3D_points).astype(np.float32) 
+                print("D3D_points.shape: = = = ",cam_idx)
+                self.visualize_point_cloud_with_labels(D3D_points,labes)
                 loss_mapping += get_loss_mapping(
                     self.config, image, depth, viewpoint, opacity
                 ) 
+                # +self.compute_projection_loss(D3D_points, labes)
 
                 # self.visualize_planar_classification(D3D_points, plane_mask)
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
@@ -366,7 +490,8 @@ class BackEnd(mp.Process):
                     depth,
                     opacity,
                     n_touched,
-                    D3D_points
+                    D3D_points,
+                    labes,
                 ) = (
                     render_pkg["render"],
                     render_pkg["viewspace_points"],
@@ -376,10 +501,13 @@ class BackEnd(mp.Process):
                     render_pkg["opacity"],
                     render_pkg["n_touched"],
                     render_pkg["3d_points"],
+                    render_pkg["labels"],
                 )
                 loss_mapping += get_loss_mapping(
                     self.config, image, depth, viewpoint, opacity
                 ) 
+                # +self.compute_projection_loss(D3D_points, labes)
+
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
                 visibility_filter_acm.append(visibility_filter)
                 radii_acm.append(radii)
@@ -562,8 +690,8 @@ class BackEnd(mp.Process):
                         cur_frame_idx, viewpoint, depth_map=depth_map, init=True
                     )
                     self.initialize_map(cur_frame_idx, viewpoint)
-                    cpu_tensor_dict = self.gaussians.gather_gaussians_to_cpu()
-                    self.manhattan_voxel.build(cpu_tensor_dict)
+                    # cpu_tensor_dict = self.gaussians.gather_gaussians_to_cpu()
+                    # self.manhattan_voxel.build(cpu_tensor_dict)
                     self.push_to_frontend("init")
 
                 elif data[0] == "keyframe":
@@ -633,10 +761,10 @@ class BackEnd(mp.Process):
                     self.map(self.current_window, iters=iter_per_kf)
                     self.map(self.current_window, prune=True)
                     cpu_tensor_dict = self.gaussians.gather_gaussians_to_cpu()
-                    self.manhattan_voxel.build(cpu_tensor_dict)
-                    voxel_data = self.manhattan_voxel.get_all_voxel_data()
-                    for key, entry_list in voxel_data.items():
-                        print(f"Voxel {key} contains {len(entry_list)} entries")
+                    # self.manhattan_voxel.build(cpu_tensor_dict)
+                    # voxel_data = self.manhattan_voxel.get_all_voxel_data()
+                    # for key, entry_list in voxel_data.items():
+                    #     print(f"Voxel {key} contains {len(entry_list)} entries")
                         # for i, entry in enumerate(entry_list):
                         #     print(f"  Entry {i}: xyz={entry['xyz']}, opacity={entry['opacity']}")
                     self.push_to_frontend("keyframe")
