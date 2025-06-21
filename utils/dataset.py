@@ -16,8 +16,9 @@ except Exception:
     pass
 
 
+
 class ReplicaParser:
-    def __init__(self, input_folder, start=562, end=600):
+    def __init__(self, input_folder, start=800, end=1000):
         self.input_folder = input_folder
 
         # 全部路径读取
@@ -86,8 +87,8 @@ class TUMParser:
             associations = []
 
             # 限制处理范围为索引 300 到 600
-            start_idx = 300
-            end_idx = 600
+            start_idx = 0
+            end_idx = len(tstamp_image)
 
             for i in range(start_idx, min(end_idx + 1, len(tstamp_image))):
                 t = tstamp_image[i]

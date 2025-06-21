@@ -464,8 +464,8 @@ class BackEnd(mp.Process):
                     labes = labes.detach().cpu().numpy()
                 labes = np.asarray(labes).astype(np.int32)
                 D3D_points = np.asarray(D3D_points).astype(np.float32) 
-                print("D3D_points.shape: = = = ",cam_idx)
-                self.visualize_point_cloud_with_labels(D3D_points,labes)
+                # print("D3D_points.shape: = = = ",cam_idx)
+                # self.visualize_point_cloud_with_labels(D3D_points,labes)
                 loss_mapping += get_loss_mapping(
                     self.config, image, depth, viewpoint, opacity
                 ) 
@@ -651,6 +651,8 @@ class BackEnd(mp.Process):
         self.frontend_queue.put(msg)
 
     def run(self):
+        mapping_duration = 0.0
+        count = 0
         while True:
             if self.backend_queue.empty():
                 if self.pause:
@@ -757,9 +759,12 @@ class BackEnd(mp.Process):
                             }
                         )
                     self.keyframe_optimizers = torch.optim.Adam(opt_params)
-
+                    count+=1
+                    mapping_start_time = time.time()
                     self.map(self.current_window, iters=iter_per_kf)
                     self.map(self.current_window, prune=True)
+                    mapping_end_time = time.time()
+                    mapping_duration += mapping_end_time - mapping_start_time
                     cpu_tensor_dict = self.gaussians.gather_gaussians_to_cpu()
                     # self.manhattan_voxel.build(cpu_tensor_dict)
                     # voxel_data = self.manhattan_voxel.get_all_voxel_data()
@@ -770,6 +775,14 @@ class BackEnd(mp.Process):
                     self.push_to_frontend("keyframe")
                 else:
                     raise Exception("Unprocessed data", data)
+        maping_iters = 150*count
+        # === 打印汇总统计 ===
+        avg_tracking_iter = mapping_duration/ maping_iters * 1000  # ms
+        avg_tracking_frame = mapping_duration/ count  # s
+
+        print(f"\n--- Performance Summary ---")
+        print(f"Average Mapping/Iteration Time: {avg_tracking_iter:.6f} ms")
+        print(f"Average Mapping/Frame Time:     {avg_tracking_frame:.6f} s")
         while not self.backend_queue.empty():
             self.backend_queue.get()
         while not self.frontend_queue.empty():

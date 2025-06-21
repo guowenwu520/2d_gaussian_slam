@@ -184,7 +184,7 @@ class SLAM:
                 FPS,
             )
             wandb.log({"Metrics": metrics_table})
-            save_gaussians(self.gaussians, self.save_dir, "final_after_opt", final=True)
+        save_gaussians(self.gaussians, self.save_dir, "final_after_opt", final=True)
 
         backend_queue.put(["stop"])
         backend_process.join()

@@ -399,39 +399,32 @@ class GaussianModel:
 
 
 
-    def visualize_point_cloud_with_labels(self,xyz, point_plane_labels):
+    def visualize_point_cloud_with_labels(self, xyz, point_plane_labels, visible_labels=[0,1,3,4,5,6]):
         """
-        根据标签给点云着色并显示。
+        给指定标签着色，其他设为灰色。
 
         参数：
             xyz (np.ndarray): 点云坐标 [N, 3]
-            point_plane_labels (np.ndarray): 点对应的平面标签 [N]，-1 表示无标签
+            point_plane_labels (np.ndarray): 标签 [N]
+            visible_labels (list or set, optional): 只高亮显示这些标签
         """
-
         # 创建 Open3D 点云对象
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(xyz)
 
         labels = point_plane_labels
-        unique_labels = np.unique(labels)
-        # 排除-1
-        unique_labels = unique_labels[unique_labels != -1]
-
-        # 用 matplotlib 取 N 个不同颜色
         cmap = plt.get_cmap("tab20")
         colors = np.zeros((len(labels), 3))
 
-        for i, label in enumerate(unique_labels):
+        for i, label in enumerate(np.unique(labels)):
             mask = labels == label
-            color = cmap(i % 20)[:3]  # RGB 三通道
-            colors[mask] = color
-
-        # 给没有标签的点涂灰色
-        colors[labels == -1] = np.array([0.5, 0.5, 0.5])
+            if visible_labels is not None and label not in visible_labels:
+                colors[mask] = [0.5, 0.5, 0.5]  # 灰色
+            else:
+                color = cmap(i % 20)[:3]
+                colors[mask] = color
 
         pcd.colors = o3d.utility.Vector3dVector(colors)
-
-        # 可视化
         o3d.visualization.draw_geometries([pcd])
 
 
@@ -472,6 +465,42 @@ class GaussianModel:
 
             pcd_tmp.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=1.0, max_nn=1500))
             pcd_tmp.normalize_normals()
+            # pcd_dense = o3d.geometry.PointCloud.create_from_rgbd_image(
+            #     rgbd,
+            #     o3d.camera.PinholeCameraIntrinsic(
+            #         cam.image_width,
+            #         cam.image_height,
+            #         cam.fx,
+            #         cam.fy,
+            #         cam.cx,
+            #         cam.cy,
+            #     )
+            # )
+
+            # pcd_dense.estimate_normals(
+            #     search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=1.0, max_nn=30)
+            # )
+
+            # # 获取每个点的法线
+            # normals = np.asarray(pcd_dense.normals)
+            # points = np.asarray(pcd_dense.points)
+
+            # # 重新投影这些点回图像
+            # x, y, z = points[:, 0], points[:, 1], points[:, 2]
+            # z[z == 0] = 1e-6
+            # u = (cam.fx * x / z + cam.cx).astype(np.int32)
+            # v = (cam.fy * y / z + cam.cy).astype(np.int32)
+
+            # # 过滤合法范围
+            # valid = (u >= 0) & (u < cam.image_width) & (v >= 0) & (v < cam.image_height)
+
+            # normals_color = ((normals + 1.0) / 2.0 * 255).astype(np.uint8)
+            # normal_image = np.zeros((cam.image_height, cam.image_width, 3), dtype=np.uint8)
+            # normal_image[v[valid], u[valid]] = normals_color[valid]
+
+            # import imageio
+            # imageio.imwrite("dense_normal_map.png", normal_image)
+            # print("Dense normal map saved.")
 
             xyz = np.asarray(pcd_tmp.points)
             rgb_np = np.asarray(pcd_tmp.colors)
@@ -486,7 +515,7 @@ class GaussianModel:
             )
             self.ply_input = pcd
 
-            self.visualize_point_cloud_with_labels(xyz, point_plane_labels)
+            # self.visualize_point_cloud_with_labels(xyz, point_plane_labels)
             point_plane_labels = torch.from_numpy(point_plane_labels).float().cuda()
             fused_point_cloud = torch.from_numpy(np.asarray(pcd.points)).float().cuda()
             fused_color = RGB2SH(torch.from_numpy(np.asarray(pcd.colors)).float().cuda())
@@ -645,12 +674,19 @@ class GaussianModel:
             l.append("scale_{}".format(i))
         for i in range(self._rotation.shape[1]):
             l.append("rot_{}".format(i))
+        l.append("label")    
         return l
 
     def save_ply(self, path):
         mkdir_p(os.path.dirname(path))
 
         xyz = self._xyz.detach().cpu().numpy()
+        labels = self._point_labels.detach().cpu().numpy().astype(np.float32).reshape(-1, 1)
+        assert labels.shape[0] == xyz.shape[0], "Label count must match point count"
+        if self._features_dc.numel() == 0:
+            print("Warning: features_dc is empty, skipping save.")
+            return
+
         normals = np.zeros_like(xyz)
         f_dc = (
             self._features_dc.detach()
@@ -675,9 +711,10 @@ class GaussianModel:
         dtype_full = [
             (attribute, "f4") for attribute in self.construct_list_of_attributes()
         ]
+        dtype_full[-1] = ("label", "i4")
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
         attributes = np.concatenate(
-            (xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1
+            (xyz, normals, f_dc, f_rest, opacities, scale, rotation,labels), axis=1
         )
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, "vertex")
@@ -784,7 +821,86 @@ class GaussianModel:
         self._rotation = nn.Parameter(
             torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True)
         )
-        self.active_sh_degree = self.max_sh_degree
+        if "label" in plydata.elements[0].data.dtype.names:
+            labels = np.asarray(plydata.elements[0]["label"])
+            self._point_labels = torch.tensor(labels, dtype=torch.int32, device="cuda")
+        else:
+            print("No 'label' field found in PLY. Initializing empty label tensor.")
+            self._point_labels = torch.empty((xyz.shape[0],), dtype=torch.int32, device="cuda")
+        self.active_sh_degree = 0
+        # 定义你希望高亮显示的标签列表，例如只显示标签 1 和 3 为真彩，其余为灰色
+        highlight_labels = [1,0,3,4,5,6]
+        label_colors = torch.tensor([
+            [1.0, 0.0, 0.0],    # 红 0
+            [0.0, 1.0, 0.0],    # 绿 1
+            [0.0, 0.0, 1.0],    # 蓝 2
+            [1.0, 1.0, 0.0],    # 黄 3
+            [1.0, 0.0, 1.0],    # 品红 4
+            [0.0, 1.0, 1.0],    # 青 5
+            [1.0, 0.5, 0.0],    # 橙 6
+            [0.5, 0.0, 0.5],    # 紫 7
+            [0.0, 0.5, 0.5],    # 蓝绿 8
+            [0.5, 0.5, 0.0],    # 土黄  9
+            [0.5, 0.0, 0.0],    # 深红 10
+            [0.0, 0.5, 0.0],    # 深绿 11 
+            [0.0, 0.0, 0.5],    # 深蓝 12
+            [1.0, 0.8, 0.6],    # 肤色 13
+            [0.6, 0.4, 0.2],    # 棕色 14
+            [0.9, 0.1, 0.5],    # 粉紫 15
+            [0.4, 0.8, 0.0],    # 荧光绿 16
+            [0.3, 0.6, 0.9],    # 天蓝 17
+            [0.9, 0.3, 0.7],    # 桃红 18
+        ], dtype=torch.float32, device="cuda")  # shape: (20, 3)
+
+        label_indices = self._point_labels.long()
+
+        # 防止索引越界（label 值超出颜色表长度）
+        label_indices_safe = label_indices % 19
+
+        # 获取颜色，默认所有点都用 label color 映射
+        dc_colors = label_colors[label_indices_safe]
+
+        # 创建 mask：哪些点是要高亮显示颜色的（指定标签）
+        highlight_mask = torch.isin(label_indices, torch.tensor(highlight_labels, device="cuda"))
+
+        # 设置灰色值（你可以换成别的颜色）
+        gray_color = torch.tensor([0.5, 0.5, 0.5], device="cuda")
+
+        # 把不在 highlight_labels 中的点颜色设置为灰色
+        dc_colors[~highlight_mask] = gray_color  # ~ 取反，即非高亮标签
+
+        # 形状调整成 (N, 1, 3)
+        # self._features_dc = nn.Parameter(
+        #     dc_colors.unsqueeze(1).contiguous().requires_grad_(False)
+        # )
+
+        # features_rest 全设为 0，shape = (N, 1, SH_len - 1)
+        n_points = dc_colors.shape[0]
+        sh_dim = self.max_sh_degree  # 去掉 DC（3维）
+       # 你 transpose 之前就要设好 shape
+#         self._features_rest = nn.Parameter(
+#     torch.zeros((n_points, 3, 0), dtype=torch.float32, device="cuda").requires_grad_(False)
+# )
+
+        # 设置最大尺度阈值
+        max_scale_threshold = 0.001  # 可调整，例如单位是米，过大球不渲染
+
+        # scales: shape (N, 3)，取每点的最大尺度
+        max_per_point_scale = self._scaling.data.max(dim=1).values
+
+        # 创建 mask，保留尺度较小的高斯球
+        valid_scale_mask = max_per_point_scale < max_scale_threshold
+
+        # 用 mask 筛选所有相关字段
+        self._xyz = nn.Parameter(self._xyz.data[valid_scale_mask].requires_grad_(True))
+        self._features_dc = nn.Parameter(self._features_dc.data[valid_scale_mask].requires_grad_(False))
+        self._features_rest = nn.Parameter(self._features_rest.data[valid_scale_mask].requires_grad_(False))
+        self._opacity = nn.Parameter(self._opacity.data[valid_scale_mask].requires_grad_(True))
+        self._scaling = nn.Parameter(self._scaling.data[valid_scale_mask].requires_grad_(True))
+        self._rotation = nn.Parameter(self._rotation.data[valid_scale_mask].requires_grad_(True))
+        self._point_labels = self._point_labels[valid_scale_mask]
+
+
         self.max_radii2D = torch.zeros((self._xyz.shape[0]), device="cuda")
         self.unique_kfIDs = torch.zeros((self._xyz.shape[0]))
         self.n_obs = torch.zeros((self._xyz.shape[0]), device="cpu").int()

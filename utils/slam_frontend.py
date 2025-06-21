@@ -328,7 +328,8 @@ class FrontEnd(mp.Process):
         projection_matrix = projection_matrix.to(device=self.device)
         tic = torch.cuda.Event(enable_timing=True)
         toc = torch.cuda.Event(enable_timing=True)
-
+        track_duration = 0.0
+        count = 0
         while True:
             if self.q_vis2main.empty():
                 if self.pause:
@@ -346,14 +347,14 @@ class FrontEnd(mp.Process):
                 tic.record()
                 if cur_frame_idx >= len(self.dataset):
                     if self.save_results:
-                        eval_ate(
-                            self.cameras,
-                            self.kf_indices,
-                            self.save_dir,
-                            0,
-                            final=True,
-                            monocular=self.monocular,
-                        )
+                        # eval_ate(
+                        #     self.cameras,
+                        #     self.kf_indices,
+                        #     self.save_dir,
+                        #     0,
+                        #     final=True,
+                        #     monocular=self.monocular,
+                        # )
                         save_gaussians(
                             self.gaussians, self.save_dir, "final", final=True
                         )
@@ -388,13 +389,16 @@ class FrontEnd(mp.Process):
                     len(self.current_window) == self.window_size
                 )
 
+                track_start_time = time.time()
                 # Tracking
                 render_pkg = self.tracking(cur_frame_idx, viewpoint)
-
+                count+=1
+                track_end_time = time.time()
+                track_duration += track_end_time - track_start_time
                 current_window_dict = {}
                 current_window_dict[self.current_window[0]] = self.current_window[1:]
                 keyframes = [self.cameras[kf_idx] for kf_idx in self.current_window]
-
+                # self.gaussians.load_ply("/home/guowenwu/workspace/indoor_GS_SLAM/RGBD_GS_SLAM/2_results/replica_room1/2025-06-12-20-06-06/point_cloud/final/point_cloud.ply")
                 self.q_main2vis.put(
                     gui_utils.GaussianPacket(
                         gaussians=clone_obj(self.gaussians),
@@ -494,3 +498,12 @@ class FrontEnd(mp.Process):
                 elif data[0] == "stop":
                     Log("Frontend Stopped.")
                     break
+        
+        tracking_iters = 100*count
+        # === 打印汇总统计 ===
+        avg_tracking_iter = track_duration/ tracking_iters * 1000  # ms
+        avg_tracking_frame = track_duration/ count  # s
+
+        print(f"\n--- Performance Summary ---")
+        print(f"Average Tracking/Iteration Time: {avg_tracking_iter:.6f} ms")
+        print(f"Average Tracking/Frame Time:     {avg_tracking_frame:.6f} s")

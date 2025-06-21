@@ -4,6 +4,7 @@ import time
 from datetime import datetime
 
 import cv2
+from matplotlib import pyplot as plt
 import glfw
 import imgviz
 import numpy as np
@@ -548,6 +549,12 @@ class SLAM_GUI:
             rgb_kf = imgviz.depth2rgb(
                 kf_ids.view(-1, 1).cpu().numpy(), colormap="jet", dtype=np.float32
             )
+            # fixed_color = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32)  # RGB 三通道
+
+            # # 扩展颜色到与 kf_ids 数量匹配（假设每个高斯点一个颜色）
+            # # 假设 kf_ids 形状为 [N]（N 为高斯点数量），则扩展为 [N, 3]
+            # rgb_fixed = fixed_color.repeat(kf_ids.shape[0], 1) 
+
             alpha = 0.1
             self.gaussian_cur.get_features = alpha * features + (
                 1 - alpha
@@ -570,6 +577,48 @@ class SLAM_GUI:
             )
         return rendering_data
 
+    def rgb_to_sh(self,rgb_colors):
+        """
+        将 RGB 颜色转换为低阶 SH 系数（l=0,1 阶，共 3 个系数）
+        Args:
+            rgb_colors: 形状 (N, 3) 的 RGB 颜色数组（范围 [0, 1]）
+        Returns:
+            sh_coeffs: 形状 (N, 3, 3) 的 SH 系数数组（3 个通道 × 3 个系数）
+        """
+        N = rgb_colors.shape[0]
+        sh_coeffs = np.zeros((N, 3, 3), dtype=np.float32)  # (N, 3通道, 3系数)
+        
+        # SH 基函数的归一化系数（l=0,1 阶）
+        # l=0, m=0: Y00 = sqrt(1/(4π))
+        Y00 = np.sqrt(1.0 / (4 * np.pi))
+        # l=1, m=-1: Y1m1 = sqrt(3/(4π)) * y/r → 归一化后系数为 sqrt(3/(4π))
+        Y1m1 = np.sqrt(3.0 / (4 * np.pi))
+        # l=1, m=0: Y10 = sqrt(3/(4π)) * z/r → 归一化后系数为 sqrt(3/(4π))
+        Y10 = np.sqrt(3.0 / (4 * np.pi))
+        # l=1, m=1: Y11 = sqrt(3/(4π)) * x/r → 归一化后系数为 sqrt(3/(4π))
+        Y11 = np.sqrt(3.0 / (4 * np.pi))
+        
+        # 对每个点计算 SH 系数
+        for i in range(N):
+            r, g, b = rgb_colors[i]
+            
+            # l=0 阶系数（常数项）
+            sh_coeffs[i, 0, 0] = Y00  # R 通道的 l=0 系数
+            sh_coeffs[i, 1, 0] = Y00  # G 通道的 l=0 系数
+            sh_coeffs[i, 2, 0] = Y00  # B 通道的 l=0 系数
+            
+            # l=1 阶系数（对应 X/Y/Z 方向）
+            # 注意：此处假设颜色与视角无关（常数颜色），因此直接乘以基函数值
+            # 若颜色随视角变化，需更复杂的积分（此处简化为常数）
+            sh_coeffs[i, 0, 1] = Y11 * r  # R 通道的 l=1, m=1 系数（对应 X 方向）
+            sh_coeffs[i, 0, 2] = Y10 * r  # R 通道的 l=1, m=0 系数（对应 Z 方向）
+            sh_coeffs[i, 0, 0] += Y1m1 * r  # R 通道的 l=1, m=-1 系数（对应 Y 方向）
+            
+            # 类似处理 G 和 B 通道（此处示例仅 R 通道，G/B 需调整）
+            # 实际需根据 SH 基函数的方向与颜色通道的关联调整
+            # （注：此部分需根据渲染器的 SH 编码方式调整，可能需交换 m 的顺序）
+        
+        return sh_coeffs
     def render_o3d_image(self, results, current_cam):
         if self.depth_chbox.checked:
             depth = results["depth"]
@@ -618,12 +667,36 @@ class SLAM_GUI:
             self.g_camera.position = frustum.eye.astype(np.float32)
             self.g_camera.target = frustum.center.astype(np.float32)
             self.g_camera.up = frustum.up.astype(np.float32)
-
             self.gaussians_gl.xyz = self.gaussian_cur.get_xyz.cpu().numpy()
             self.gaussians_gl.opacity = self.gaussian_cur.get_opacity.cpu().numpy()
-            self.gaussians_gl.scale = self.gaussian_cur.get_scaling.cpu().numpy()
+            scales = self.gaussian_cur.get_scaling.cpu().numpy()  # (N, 3)
+            min_indices = np.argmin(scales, axis=1)               # (N,)
+          
+
+       
+            self.gaussians_gl.scale = scales
+
             self.gaussians_gl.rot = self.gaussian_cur.get_rotation.cpu().numpy()
+
+            self.gaussian_cur.get_labels.cpu().numpy()
             self.gaussians_gl.sh = self.gaussian_cur.get_features.cpu().numpy()[:, 0, :]
+
+            # 筛选条件：x, y, z 都 <= 0.4
+            valid_mask = np.all(scales <= 0.04, axis=1)  # (N,)
+
+            # 筛选出满足条件的数据
+            xyz = self.gaussians_gl.xyz[valid_mask]
+            opacity = self.gaussians_gl.opacity[valid_mask]
+            scales = self.gaussians_gl.scale[valid_mask]
+            rot = self.gaussians_gl.rot[valid_mask]
+            sh = self.gaussians_gl.sh[valid_mask]
+            # 赋值到 gaussians_gl
+            self.gaussians_gl.xyz = xyz
+            self.gaussians_gl.opacity = opacity
+            self.gaussians_gl.scale = scales
+            self.gaussians_gl.rot = rot
+            self.gaussians_gl.sh = sh
+
 
             self.update_activated_renderer_state(self.gaussians_gl)
             self.g_renderer.sort_and_update(self.g_camera)

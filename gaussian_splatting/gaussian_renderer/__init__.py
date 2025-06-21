@@ -11,6 +11,8 @@
 
 import math
 
+from matplotlib import pyplot as plt
+
 import torch
 from diff_gaussian_rasterization import (
     GaussianRasterizationSettings,
@@ -97,8 +99,36 @@ def render(
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
     shs = None
     colors_precomp = None
+
+    #  # 确保标签是连续的0-based整数（若否，先映射）
+    # unique_labels = labels.unique(sorted=True)
+    # num_classes = len(unique_labels)
+    # # print("num_classes: ", num_classes)
+    # # 处理num_classes=1的边界情况（避免除以0）
+    # if num_classes == 1:
+    #     # 单类别时使用固定颜色（如红色），显式指定float32
+    #     colors = torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32, device=pc.get_features.device)
+    # else:
+    #     # 生成0到1的类别索引（CPU NumPy数组）
+    #     class_indices = torch.arange(num_classes, device=pc.get_features.device).float()  # 默认是float32
+    #     class_indices_cpu = (class_indices / (num_classes - 1)).cpu().numpy()  # 移至CPU并转为NumPy
+
+    #     # 使用Matplotlib颜色映射（如'tab10'）
+    #     cmap = plt.cm.get_cmap('tab10', num_classes)
+    #     colors_np = cmap(class_indices_cpu)[:, :3]  # 获取RGB（形状：[num_classes, 3]）
+
+    #     # 转回CUDA张量时显式指定float32类型
+    #     colors = torch.tensor(colors_np, dtype=torch.float32, device=pc.get_features.device)
+
+    # # 映射标签到颜色（假设标签是0-based连续整数）
+    # fixed_color = colors[labels.long()]  # 确保labels是long类型索引
+    # 替换原固定颜色为标签映射的颜色
+    # fixed_color = point_colors
+    # --------------------------
+
     if colors_precomp is None:
         if pipe.convert_SHs_python:
+            # 若需使用 SHs 计算颜色（但我们要固定颜色，所以跳过此分支）
             shs_view = pc.get_features.transpose(1, 2).view(
                 -1, 3, (pc.max_sh_degree + 1) ** 2
             )
@@ -111,7 +141,12 @@ def render(
         else:
             shs = pc.get_features
     else:
-        colors_precomp = override_color
+        colors_precomp = override_color  # 原始逻辑（若 override_color 存在）
+
+    # --------------------------
+    # 强制覆盖为固定颜色，并显式禁用 SHs
+    # colors_precomp = fixed_color  # 使用预计算颜色
+    # shs = None  # 关键！确保不传递 SHs
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen).
     if mask is not None:
