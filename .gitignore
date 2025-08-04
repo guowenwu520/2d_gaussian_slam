@@ -1,0 +1,10 @@
+gs/*.pyc
+gs/.vscode
+gs/output
+gs/build
+gs/diff_rasterization/diff_rast.egg-info
+gs/diff_rasterization/dist
+gs/tensorboard_3d
+gs/screenshots
+gs/input
+Depth-Anything-V2/checkpoints/
