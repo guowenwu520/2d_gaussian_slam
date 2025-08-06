@@ -22,7 +22,7 @@ class Scene:
 
     gaussians : GaussianModel
 
-    def __init__(self, args : ModelParams, gaussians : GaussianModel, is_single_read = True,load_iteration=None, shuffle=True, resolution_scales=[1.0],gradually_read = True,only_load_extra_images = False):
+    def __init__(self, args : ModelParams, gaussians : GaussianModel, is_single_read = True,load_iteration=None, shuffle=True, resolution_scales=[1.0],gradually_read = True,add_extra_images = False):
         """b
         :param path: Path to colmap scene main folder.
         """
@@ -40,11 +40,13 @@ class Scene:
         self.train_cameras = {}
         self.test_cameras = {}
         if os.path.exists(os.path.join(args.source_path, "sparse")):
-            scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.depths, args.eval, args.train_test_exp,only_load_extra_images)
+            scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.depths, args.eval, args.train_test_exp,add_extra_images)
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.depths, args.eval)
-        else:
+        elif os.path.exists(os.path.join(args.source_path, "rgb")):
+            scene_info = sceneLoadTypeCallbacks["VGGT"](args.source_path)
+        else:    
             assert False, "Could not recognize scene type!"
 
         if not self.loaded_iter:

@@ -51,6 +51,8 @@ class ModelParams(ParamGroup):
         self._model_path = ""
         self._images = "images"
         self._depths = ""
+        self._alist_images = None
+        self._blist_depths = None
         self._resolution = -1
         self._white_background = False
         self.train_test_exp = False

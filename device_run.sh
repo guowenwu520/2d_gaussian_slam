@@ -18,14 +18,14 @@ python train.py -s "$BASE_DIR"  --data_device "cpu"\
   --exposure_lr_final 0.0001 \
   --exposure_lr_delay_steps 5000 \
   --exposure_lr_delay_mult 0.001 \
-  --iterations 30000\
+  --iterations 15000\
   --position_lr_max_steps 30000\
   --densification_interval 100\
   --opacity_reset_interval 3000\
   --densify_from_iter 500\
   --densify_until_iter 15000\
-  --save_iterations 7000 30000\
-  --test_iterations 7000 30000\
+  --save_iterations 7000 15000\
+  --test_iterations 7000 15000\
   --single_read \
   --used_mask \
   --train_test_exp

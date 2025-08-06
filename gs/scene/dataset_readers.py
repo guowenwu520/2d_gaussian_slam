@@ -21,6 +21,7 @@ import json
 from pathlib import Path
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
+from utils.data_load import TUMParser
 from scene.gaussian_model import BasicPointCloud
 
 class CameraInfo(NamedTuple):
@@ -75,11 +76,12 @@ def readColmapCameras(
     images_folder,
     depths_folder,
     test_cam_names_list,
-    only_use_extra=False  # 新增参数，控制是否仅使用含 "extra" 的数据
+    add_extra=False  # 新增参数，控制是否仅使用含 "extra" 的数据
 ):
     cam_infos = []
-    print(f"only_use_extra = {only_use_extra}")
+    print(f"add_extra = {add_extra}")
     used_nums = 0
+    count = 1
     for idx, key in enumerate(cam_extrinsics):
         extr = cam_extrinsics[key]
         intr = cam_intrinsics[extr.camera_id]
@@ -119,11 +121,27 @@ def readColmapCameras(
         image_name = extr.name
         depth_path = os.path.join(depths_folder, f"{image_name_no_ext}.png") if depths_folder != "" else ""
 
-        # === 根据 only_use_extra 过滤 ===
-        if only_use_extra and "extra" not in str(image_path):
-            continue
+        # === 根据 add_extra 过滤 ===
+        if add_extra and "extra" in str(image_path):
+            count = count+1
+            # for i in range(1):
+            #     cam_info = CameraInfo(
+            #         uid=uid,
+            #         R=R,
+            #         T=T,
+            #         FovY=FovY,
+            #         FovX=FovX,
+            #         depth_params=depth_params,
+            #         image_path=image_path,
+            #         image_name=image_name,
+            #         depth_path=depth_path,
+            #         width=width,
+            #         height=height,
+            #         is_test=image_name in test_cam_names_list
+            #     )
+            #     cam_infos.append(cam_info)
         used_nums = used_nums + 1    
-        # print(f"image_path = {image_path}","extra" not in str(image_path),only_use_extra)
+        # print(f"image_path = {image_path}","extra" not in str(image_path),add_extra)
         # === 构建相机信息对象 ===
         cam_info = CameraInfo(
             uid=uid,
@@ -142,7 +160,7 @@ def readColmapCameras(
         cam_infos.append(cam_info)
 
    
-    print("Read camera {} total camera {}\n".format(used_nums, len(cam_extrinsics)))
+    print("Read camera {} total camera {}\n".format(count, len(cam_infos)))
     return cam_infos
 
 
@@ -170,8 +188,101 @@ def storePly(path, xyz, rgb):
     vertex_element = PlyElement.describe(elements, 'vertex')
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
+def readVGGTSceneInfo(path):
+    # parser = TUMParser(path)
+    # num_imgs = parser.n_img
+    # color_paths = parser.color_paths
+    # depth_paths = parser.depth_paths
+    # poses = parser.poses
+    # plane_paths = parser.plane_info
+    # is_plane_info = parser.is_plane_info
+    # dataset.alist_images = parser.color_paths
+    # dataset.blist_depths  = parser.depth_paths
+    # try:
+    #     cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
+    #     cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
+    #     cam_extrinsics = read_extrinsics_binary(cameras_extrinsic_file)
+    #     cam_intrinsics = read_intrinsics_binary(cameras_intrinsic_file)
+    # except:
+    #     cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.txt")
+    #     cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.txt")
+    #     cam_extrinsics = read_extrinsics_text(cameras_extrinsic_file)
+    #     cam_intrinsics = read_intrinsics_text(cameras_intrinsic_file)
 
-def readColmapSceneInfo(path, images, depths, eval, train_test_exp,only_load_extra_images,llffhold=8):
+    # depth_params_file = os.path.join(path, "sparse/0", "depth_params.json")
+    # ## if depth_params_file isnt there AND depths file is here -> throw error
+    # depths_params = None
+    # if depths != "":
+    #     try:
+    #         with open(depth_params_file, "r") as f:
+    #             depths_params = json.load(f)
+    #         all_scales = np.array([depths_params[key]["scale"] for key in depths_params])
+    #         if (all_scales > 0).sum():
+    #             med_scale = np.median(all_scales[all_scales > 0])
+    #         else:
+    #             med_scale = 0
+    #         for key in depths_params:
+    #             depths_params[key]["med_scale"] = med_scale
+
+    #     except FileNotFoundError:
+    #         print(f"Error: depth_params.json file not found at path '{depth_params_file}'.")
+    #         sys.exit(1)
+    #     except Exception as e:
+    #         print(f"An unexpected error occurred when trying to open depth_params.json file: {e}")
+    #         sys.exit(1)
+
+    # if eval:
+    #     if "360" in path:
+    #         llffhold = 8
+    #     if llffhold:
+    #         print("------------LLFF HOLD-------------")
+    #         cam_names = [cam_extrinsics[cam_id].name for cam_id in cam_extrinsics]
+    #         cam_names = sorted(cam_names)
+    #         test_cam_names_list = [name for idx, name in enumerate(cam_names) if idx % llffhold == 0]
+    #     else:
+    #         with open(os.path.join(path, "sparse/0", "test.txt"), 'r') as file:
+    #             test_cam_names_list = [line.strip() for line in file]
+    # else:
+    #     test_cam_names_list = []
+
+    # reading_dir = "images" if images == None else images
+    # cam_infos_unsorted = readColmapCameras(
+    #     cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, depths_params=depths_params,
+    #     images_folder=os.path.join(path, reading_dir), 
+    #     depths_folder=os.path.join(path, depths) if depths != "" else "", test_cam_names_list=test_cam_names_list,add_extra = add_extra_images)
+    # cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
+
+    # train_cam_infos = [c for c in cam_infos if train_test_exp or not c.is_test]
+    # test_cam_infos = [c for c in cam_infos if c.is_test]
+
+    # nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    # ply_path = os.path.join(path, "sparse/0/points3D.ply")
+    # bin_path = os.path.join(path, "sparse/0/points3D.bin")
+    # txt_path = os.path.join(path, "sparse/0/points3D.txt")
+    # if not os.path.exists(ply_path):
+    #     print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
+    #     try:
+    #         xyz, rgb, _ = read_points3D_binary(bin_path)
+    #     except:
+    #         xyz, rgb, _ = read_points3D_text(txt_path)
+    #     storePly(ply_path, xyz, rgb)
+    # try:
+    #     pcd = fetchPly(ply_path)
+    # except:
+    #     pcd = None
+
+    # scene_info = SceneInfo(point_cloud=pcd,
+    #                        train_cameras=train_cam_infos,
+    #                        test_cameras=test_cam_infos,
+    #                        nerf_normalization=nerf_normalization,
+    #                        ply_path=ply_path,
+    #                        is_nerf_synthetic=False)
+    # return scene_info
+    pass
+
+
+def readColmapSceneInfo(path, images, depths, eval, train_test_exp,add_extra_images,llffhold=8):
     try:
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
@@ -223,7 +334,7 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp,only_load_ext
     cam_infos_unsorted = readColmapCameras(
         cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, depths_params=depths_params,
         images_folder=os.path.join(path, reading_dir), 
-        depths_folder=os.path.join(path, depths) if depths != "" else "", test_cam_names_list=test_cam_names_list,only_use_extra = only_load_extra_images)
+        depths_folder=os.path.join(path, depths) if depths != "" else "", test_cam_names_list=test_cam_names_list,add_extra = add_extra_images)
     cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
 
     train_cam_infos = [c for c in cam_infos if train_test_exp or not c.is_test]
@@ -340,5 +451,6 @@ def readNerfSyntheticInfo(path, white_background, depths, eval, extension=".png"
 
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
-    "Blender" : readNerfSyntheticInfo
+    "Blender" : readNerfSyntheticInfo,
+    "VGGT":readVGGTSceneInfo
 }

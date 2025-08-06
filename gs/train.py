@@ -23,6 +23,9 @@ from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 from torchvision.utils import save_image
+from piq import ssim 
+import lpips
+
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -42,6 +45,151 @@ except:
     SPARSE_ADAM_AVAILABLE = False
     
 
+def vggt_training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from,is_used_mask,is_single_read):
+
+    if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
+        sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
+
+    first_iter = 0
+    tb_writer = prepare_output_and_logger(dataset)
+    gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
+    scene = Scene(dataset, gaussians,is_single_read)
+    gaussians.training_setup(opt)
+    if checkpoint:
+        (model_params, first_iter) = torch.load(checkpoint)
+        gaussians.restore(model_params, opt)
+
+    bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+
+    iter_start = torch.cuda.Event(enable_timing = True)
+    iter_end = torch.cuda.Event(enable_timing = True)
+
+    use_sparse_adam = opt.optimizer_type == "sparse_adam" and SPARSE_ADAM_AVAILABLE 
+    depth_l1_weight = get_expon_lr_func(opt.depth_l1_weight_init, opt.depth_l1_weight_final, max_steps=opt.iterations)
+
+    viewpoint_stack = scene.getTrainCameras().copy()
+    viewpoint_indices = list(range(len(viewpoint_stack)))
+    ema_loss_for_log = 0.0
+    ema_Ll1depth_for_log = 0.0
+
+    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
+    first_iter += 1
+    for iteration in range(first_iter, opt.iterations + 1):
+
+        iter_start.record()
+
+        gaussians.update_learning_rate(iteration)
+
+        # Every 1000 its we increase the levels of SH up to a maximum degree
+        if iteration % 1000 == 0:
+            gaussians.oneupSHdegree()
+
+        # Pick a random Camera
+        if not viewpoint_stack:
+            viewpoint_stack = scene.getTrainCameras().copy()
+            viewpoint_indices = list(range(len(viewpoint_stack)))
+        rand_idx = randint(0, len(viewpoint_indices) - 1)
+        # print(rand_idx,"len(viewpoint_indices)len(viewpoint_indices)len(viewpoint_indices)",len(viewpoint_stack))
+        viewpoint_cam = viewpoint_stack.pop(rand_idx)
+        vind = viewpoint_indices.pop(rand_idx)
+        if is_single_read:
+           viewpoint_cam.load_image(is_used_mask)
+        # Render
+        if (iteration - 1) == debug_from:
+            pipe.debug = True
+
+        bg = torch.rand((3), device="cuda") if opt.random_background else background
+
+        render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+        image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+        if is_used_mask:
+            alpha_mask = viewpoint_cam.alpha_mask.cuda()
+            image *= (1-alpha_mask)
+
+        # save_image(image.clamp(0, 1), f"render_mask_result{iteration}.png")
+        # save_image(alpha_mask.clamp(0, 1), f"alpha_mask_result{iteration}.png")
+        # Loss
+        gt_image = viewpoint_cam.original_image.cuda()
+
+        # save_image(gt_image.clamp(0, 1), f"render/gt_result{iteration}.png")
+        Ll1 = l1_loss(image, gt_image)
+        if FUSED_SSIM_AVAILABLE:
+            ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
+        else:
+            ssim_value = ssim(image, gt_image)
+
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+
+        # Depth regularization
+        Ll1depth_pure = 0.0
+        if depth_l1_weight(iteration) > 0 and viewpoint_cam.depth_reliable:
+            invDepth = render_pkg["depth"]
+            mono_invdepth = viewpoint_cam.invdepthmap.cuda()
+            if viewpoint_cam.depth_mask is not None: 
+                depth_mask = viewpoint_cam.depth_mask.cuda()
+                # save_image(depth_mask.clamp(0, 1), f"depth_mask_result{iteration}.png")
+                Ll1depth_pure = torch.abs((invDepth  - mono_invdepth) * depth_mask).mean()
+            else:
+                Ll1depth_pure = torch.abs(invDepth  - mono_invdepth).mean()
+            Ll1depth = depth_l1_weight(iteration) * Ll1depth_pure 
+            loss += Ll1depth
+            Ll1depth = Ll1depth.item()
+        else:
+            Ll1depth = 0
+
+        loss.backward()
+
+        iter_end.record()
+
+        with torch.no_grad():
+            # Progress bar
+            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+            ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
+
+            if iteration % 10 == 0:
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}"})
+                progress_bar.update(10)
+            if iteration == opt.iterations:
+                progress_bar.close()
+
+            # Log and save
+            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp,is_used_mask,is_single_read)
+            if (iteration in saving_iterations):
+                print("\n[ITER {}] Saving Gaussians".format(iteration))
+                scene.save(iteration)
+            # Densification
+            if iteration < opt.densify_until_iter:
+                # Keep track of max radii in image-space for pruning
+                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+
+                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
+                
+                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                    gaussians.reset_opacity()
+
+            # Optimizer step
+            if iteration < opt.iterations:
+                gaussians.exposure_optimizer.step()
+                gaussians.exposure_optimizer.zero_grad(set_to_none = True)
+                if use_sparse_adam:
+                    visible = radii > 0
+                    gaussians.optimizer.step(visible, radii.shape[0])
+                    gaussians.optimizer.zero_grad(set_to_none = True)
+                else:
+                    gaussians.optimizer.step()
+                    gaussians.optimizer.zero_grad(set_to_none = True)
+
+            if (iteration in checkpoint_iterations):
+                print("\n[ITER {}] Saving Checkpoint".format(iteration))
+                torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+        
+        if is_single_read:
+           viewpoint_cam.unload_image()
+    return scene.model_path
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from,is_used_mask,is_single_read):
 
@@ -51,7 +199,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
-    scene = Scene(dataset, gaussians,is_single_read)
+    scene = Scene(dataset, gaussians,is_single_read,add_extra_images = False)
     gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -204,14 +352,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     return scene.model_path
 
 
-def extra_training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from,is_used_mask,is_single_read,model_path):
+def extra_training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from,is_used_mask,is_single_read,model_path=None):
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
 
-    tb_writer = prepare_ext_output_and_logger(dataset,model_path)
+    tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
-    scene = Scene(dataset, gaussians,is_single_read,only_load_extra_images = True)
+    scene = Scene(dataset, gaussians,is_single_read,add_extra_images = True)
     print(f"save_path ext model {args.model_path}")
     gaussians.training_setup(opt)
     if checkpoint:
@@ -280,6 +428,9 @@ def extra_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
             ssim_value = ssim(image, gt_image)
 
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+        if "extra" in viewpoint_cam.image_path:
+            # print(f"[Iteration {iteration}] Applying extra loss weight to: {viewpoint_cam.image_path}")
+            loss = loss * 5.0
 
         # Depth regularization
         Ll1depth_pure = 0.0
@@ -405,6 +556,9 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
             if config['cameras'] and len(config['cameras']) > 0:
                 l1_test = 0.0
                 psnr_test = 0.0
+                ssim_test = 0.0
+                lpips_fn = lpips.LPIPS(net='vgg').cuda()
+                lpips_test = 0.0
                 for idx, viewpoint in enumerate(config['cameras']):
                     if is_single_read:
                        viewpoint.load_image(is_used_mask)
@@ -422,11 +576,19 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                             tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
                     l1_test += l1_loss(image, gt_image).mean().double()
                     psnr_test += psnr(image, gt_image).mean().double()
+                    ssim_score = ssim(image.unsqueeze(0), gt_image.unsqueeze(0), data_range=1.0)
+                    img = image * 2 - 1
+                    gt = gt_image * 2 - 1
+                    lpips_score = lpips_fn(img.unsqueeze(0).cuda(), gt.unsqueeze(0).cuda())
+                    ssim_test += ssim_score.item()
+                    lpips_test += lpips_score.item()
                     if is_single_read:
                        viewpoint.unload_image()
                 psnr_test /= len(config['cameras'])
-                l1_test /= len(config['cameras'])          
-                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+                l1_test /= len(config['cameras']) 
+                ssim_test /= len(config['cameras'])
+                lpips_test /= len(config['cameras'])         
+                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {} SSIM {}  LPIPS {}".format(iteration, config['name'], l1_test, psnr_test,ssim_test,lpips_test))
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
@@ -453,6 +615,7 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument('--used_mask', action='store_true', default=False)
     parser.add_argument('--extra_img', action='store_true', default=False)
+    parser.add_argument('--vggt_test', action='store_true', default=False)
     
     parser.add_argument("--single_read", action='store_true', default=False)
     parser.add_argument("--start_checkpoint", type=str, default = None)
@@ -466,15 +629,23 @@ if __name__ == "__main__":
     print(f"single_read {args.single_read}")
     print(f"used_mask {args.used_mask}")
     print(f"extra_img {args.extra_img}")
+    print(f"vggt_test {args.vggt_test}")
 
     # Start GUI server, configure and run training
     # if not args.disable_viewer:
     #     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    model_path = training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from,args.used_mask,args.single_read)
-    args.start_checkpoint = model_path+"/chkpnt" + str(op.extract(args).iterations) + ".pth"
-    if args.extra_img:
-         extra_training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from,args.used_mask,args.single_read,model_path)
-   
+
+    if args.vggt_test:
+        dataset=lp.extract(args)
+        vggt_training(dataset, op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from,args.used_mask,args.single_read)
+    else:    
+        # model_path = training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from,args.used_mask,args.single_read)
+        if args.extra_img:
+            # training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from,args.used_mask,args.single_read)
+            # args.start_checkpoint = model_path+"/chkpnt" + str(op.extract(args).iterations) + ".pth"
+            extra_training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from,args.used_mask,args.single_read)
+        else:
+            training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from,args.used_mask,args.single_read)
     # All done
     print("\nTraining complete.")
