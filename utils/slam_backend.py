@@ -266,7 +266,7 @@ class BackEnd(mp.Process):
             loss_init = get_loss_mapping(
                 self.config, image, depth, viewpoint, opacity, initialization=True
             )
-            # +self.compute_projection_loss(D3D_points, labes)
+            +self.compute_projection_loss(D3D_points, labes)
             loss_init.backward()
 
             with torch.no_grad():
@@ -379,30 +379,56 @@ class BackEnd(mp.Process):
         proj = points - dist * plane_normal  # [N, 3]
         return proj, dist.squeeze(-1)
 
-    def compute_projection_loss(self, D3D_points, labels):
-        # return torch.tensor(0.0, device=D3D_points.device)
-        unique_labels = torch.unique(labels)
+    def compute_projection_loss(self, D3D_points, labels, plane_threshold=1e-2):
+        """
+        自动判断簇是否是平面：
+        - 如果簇点能较好拟合平面（平均距离 < plane_threshold） → 投影 loss
+        - 否则 → 法向量一致性 loss
 
-        loss_list = []
+        Args:
+            D3D_points: torch.Tensor [N, 3] 点坐标
+            labels: torch.Tensor [N] 语义标签（int）
+            plane_threshold: float 判断是否为平面的误差阈值
+        """
+        unique_labels = torch.unique(labels.detach())
+
+        total_loss = D3D_points.new_tensor(0.0)
+        total_count = 0
 
         for label in unique_labels:
             if label.item() == -1:
                 continue
             mask = labels == label
             pts = D3D_points[mask]
-            if pts.shape[0] > 1000:
-                continue  # 无法拟合平面
+            if pts.shape[0] < 3:
+                continue
 
-            # print("pts.shape:", pts.shape[0])
+            # 大簇采样，避免 OOM
+            if pts.shape[0] > 2000:
+                idx = torch.randperm(pts.shape[0], device=pts.device)[:2000]
+                pts = pts[idx]
+
+            # 尝试拟合平面
             plane_pt, plane_normal = self.fit_plane(pts)
-            proj_pts, dists = self.project_to_plane(pts, plane_pt, plane_normal)
-            loss = (dists ** 2).mean()
-            loss_list.append(loss)
+            _, dists = self.project_to_plane(pts, plane_pt, plane_normal)
+            mean_dist = dists.mean()
 
-        if len(loss_list) == 0:
-            return torch.tensor(0.0, device=D3D_points.device)
-        
-        return torch.stack(loss_list).mean()
+            if mean_dist < plane_threshold:
+                # 簇可视为平面 → 投影 loss
+                loss = (dists ** 2).mean()
+            else:
+                # 否则 → 法向量一致性 loss
+                normals = self.estimate_normals(pts)  # [N,3]
+                mean_n = normals.mean(dim=0, keepdim=True)
+                loss = ((normals - mean_n) ** 2).sum(dim=1).mean()
+
+            total_loss += loss
+            total_count += 1
+
+        if total_count == 0:
+            return D3D_points.new_tensor(0.0)
+
+        return total_loss / total_count
 
 
     def map(self, current_window, prune=False, iters=1):
@@ -458,18 +484,12 @@ class BackEnd(mp.Process):
                     render_pkg["3d_points"],
                     render_pkg["labels"],
                 )
-                if isinstance(D3D_points, torch.Tensor):
-                    D3D_points = D3D_points.detach().cpu().numpy()
-                if isinstance(labes, torch.Tensor):
-                    labes = labes.detach().cpu().numpy()
-                labes = np.asarray(labes).astype(np.int32)
-                D3D_points = np.asarray(D3D_points).astype(np.float32) 
                 # print("D3D_points.shape: = = = ",cam_idx)
                 # self.visualize_point_cloud_with_labels(D3D_points,labes)
                 loss_mapping += get_loss_mapping(
                     self.config, image, depth, viewpoint, opacity
                 ) 
-                # +self.compute_projection_loss(D3D_points, labes)
+                +self.compute_projection_loss(D3D_points, labes)
 
                 # self.visualize_planar_classification(D3D_points, plane_mask)
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
@@ -506,7 +526,7 @@ class BackEnd(mp.Process):
                 loss_mapping += get_loss_mapping(
                     self.config, image, depth, viewpoint, opacity
                 ) 
-                # +self.compute_projection_loss(D3D_points, labes)
+                +self.compute_projection_loss(D3D_points, labes)
 
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
                 visibility_filter_acm.append(visibility_filter)
