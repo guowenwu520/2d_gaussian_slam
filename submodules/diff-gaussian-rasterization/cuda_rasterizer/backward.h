@@ -21,7 +21,7 @@
 namespace BACKWARD
 {
 	void render(
-		const dim3 grid, dim3 block,
+		const dim3 grid, const dim3 block,
 		const uint2* ranges,
 		const uint32_t* point_list,
 		int W, int H,
@@ -33,12 +33,12 @@ namespace BACKWARD
 		const float* final_Ts,
 		const uint32_t* n_contrib,
 		const float* dL_dpixels,
-		const float* dL_invdepths,
+		const float* dL_dpixels_depth,
 		float3* dL_dmean2D,
 		float4* dL_dconic2D,
 		float* dL_dopacity,
 		float* dL_dcolors,
-		float* dL_dinvdepths);
+		float* dL_ddepths);
 
 	void preprocess(
 		int P, int D, int M,
@@ -46,27 +46,26 @@ namespace BACKWARD
 		const int* radii,
 		const float* shs,
 		const bool* clamped,
-		const float* opacities,
 		const glm::vec3* scales,
 		const glm::vec4* rotations,
 		const float scale_modifier,
 		const float* cov3Ds,
 		const float* view,
 		const float* proj,
+		const float* proj_raw,
 		const float focal_x, float focal_y,
 		const float tan_fovx, float tan_fovy,
 		const glm::vec3* campos,
 		const float3* dL_dmean2D,
 		const float* dL_dconics,
-		const float* dL_dinvdepth,
-		float* dL_dopacity,
 		glm::vec3* dL_dmeans,
 		float* dL_dcolor,
+		float* dL_ddepth,
 		float* dL_dcov3D,
 		float* dL_dsh,
 		glm::vec3* dL_dscale,
 		glm::vec4* dL_drot,
-		bool antialiasing);
+		float* dL_dtau);
 }
 
 #endif

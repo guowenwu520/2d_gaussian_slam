@@ -1,6 +1,6 @@
 Results:
   save_results: True
-  save_dir: "results"
+  save_dir: "runtime_results"
   save_trj: True
   save_trj_kf_intv: 20
   use_gui: True
@@ -69,7 +69,10 @@ opt_params:
   position_lr_max_steps: 30000
   feature_lr: 0.0025
   opacity_lr: 0.05
+  labels_lr: 0.001
   scaling_lr: 0.001
+  lambda_dist: 0.0
+  lambda_normal: 0.05
   rotation_lr: 0.001
   percent_dense: 0.01
   lambda_dssim: 0.2
@@ -90,3 +93,4 @@ model_params:
 pipeline_params:
   convert_SHs_python: False
   compute_cov3D_python: False
+  depth_ratio: 0.0

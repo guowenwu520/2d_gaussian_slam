@@ -49,17 +49,18 @@ class SLAM:
         self.eval_rendering = self.config["Results"]["eval_rendering"]
 
         model_params.sh_degree = 3 if self.use_spherical_harmonics else 0
-
+        # 初始化高斯模型（高斯各个属性和label）
         self.gaussians = GaussianModel(model_params.sh_degree, config=self.config)
         self.gaussians.init_lr(6.0)
+        # 根据配置文件加载不同类型的数据集
         self.dataset = load_dataset(
             model_params, model_params.source_path, config=config
         )
-
+        # 高斯模型训练设置
         self.gaussians.training_setup(opt_params)
         bg_color = [0, 0, 0]
         self.background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
-
+        # 初始化前端和后端进程间队列
         frontend_queue = mp.Queue()
         backend_queue = mp.Queue()
 
@@ -68,8 +69,10 @@ class SLAM:
 
         self.config["Results"]["save_dir"] = save_dir
         self.config["Training"]["monocular"] = self.monocular
-
+        # 初始化前端和后端模块
+        # 前端包括tracking模块（初始化map、判断是否为关键帧、关键帧窗口维护、位姿估计）
         self.frontend = FrontEnd(self.config)
+        # 后端包括mapping模块（mapping、投影到平面操作、投影损失）
         self.backend = BackEnd(self.config)
 
         self.frontend.dataset = self.dataset
@@ -184,7 +187,7 @@ class SLAM:
                 FPS,
             )
             wandb.log({"Metrics": metrics_table})
-            save_gaussians(self.gaussians, self.save_dir, "final_after_opt", final=True)
+        save_gaussians(self.gaussians, self.save_dir, "final_after_opt", final=True)
 
         backend_queue.put(["stop"])
         backend_process.join()
@@ -210,7 +213,7 @@ if __name__ == "__main__":
 
     with open(args.config, "r") as yml:
         config = yaml.safe_load(yml)
-
+    #读取配置文件
     config = load_config(args.config)
     save_dir = None
 
@@ -219,12 +222,12 @@ if __name__ == "__main__":
         Log("Following config will be overriden")
         Log("\tsave_results=True")
         config["Results"]["save_results"] = True
-        Log("\tuse_gui=False")
-        config["Results"]["use_gui"] = False
+        Log("\tuse_gui=True")
+        config["Results"]["use_gui"] = True # False -> True
         Log("\teval_rendering=True")
         config["Results"]["eval_rendering"] = True
-        Log("\tuse_wandb=True")
-        config["Results"]["use_wandb"] = True
+        Log("\tuse_wandb=True") # True -> False
+        config["Results"]["use_wandb"] = False # True -> False
 
     if config["Results"]["save_results"]:
         mkdir_p(config["Results"]["save_dir"])
@@ -248,9 +251,9 @@ if __name__ == "__main__":
         )
         wandb.define_metric("frame_idx")
         wandb.define_metric("ate*", step_metric="frame_idx")
-
+    # 初始化SLAM系统
     slam = SLAM(config, save_dir=save_dir)
-
+    # 运行
     slam.run()
     wandb.finish()
 

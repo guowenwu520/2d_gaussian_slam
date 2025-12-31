@@ -3,8 +3,8 @@ import time
 import numpy as np
 import torch
 import torch.multiprocessing as mp
-import matplotlib.pyplot as plt
-from gaussian_splatting.gaussian_renderer import render
+
+from gaussian_splatting.gaussian_render import render
 from gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, getWorld2View2
 from gui import gui_utils
 from utils.camera_utils import Camera
@@ -125,6 +125,7 @@ class FrontEnd(mp.Process):
         self.request_init(cur_frame_idx, viewpoint, depth_map)
         self.reset = False
 
+    # 跟踪当前帧的位姿
     def tracking(self, cur_frame_idx, viewpoint):
         prev = self.cameras[cur_frame_idx - self.use_every_n_frames]
         viewpoint.update_RT(prev.R, prev.T)
@@ -176,19 +177,10 @@ class FrontEnd(mp.Process):
             loss_tracking.backward()
 
             with torch.no_grad():
-                # for name, param in pose_optimizer.named_parameters():
-                #     print(name, param.grad.norm().item() if param.grad is not None else None)
-
                 pose_optimizer.step()
-
-
                 converged = update_pose(viewpoint)
 
             if tracking_itr % 10 == 0:
-                # rendered_img = image.detach().cpu().permute(1,2,0).numpy()  # (H, W, 3)
-                # plt.imshow(rendered_img)
-                # plt.title(f"Tracking Rendered Frame {cur_frame_idx}")
-                # plt.show()
                 self.q_main2vis.put(
                     gui_utils.GaussianPacket(
                         current_frame=viewpoint,
@@ -308,12 +300,12 @@ class FrontEnd(mp.Process):
         self.backend_queue.put(msg)
         self.requested_init = True
 
-    def sync_backend(self, data):
-        self.gaussians = data[1]
-        occ_aware_visibility = data[2]
-        keyframes = data[3]
+    def sync_backend(self, data): # 把后端计算出的地图/关键帧信息同步到前端
+        self.gaussians = data[1] # 更新高斯点云/渲染模型
+        occ_aware_visibility = data[2] #获取可见性掩码并赋给 self
+        keyframes = data[3] # 关键帧列表
         self.occ_aware_visibility = occ_aware_visibility
-
+        # 将每个关键帧的位姿应用到对应的前端相机
         for kf_id, kf_R, kf_T in keyframes:
             self.cameras[kf_id].update_RT(kf_R.clone(), kf_T.clone())
 
@@ -323,9 +315,7 @@ class FrontEnd(mp.Process):
             torch.cuda.empty_cache()
 
     def run(self):
-        # 初始化当前帧索引
         cur_frame_idx = 0
-        # 获取投影矩阵
         projection_matrix = getProjectionMatrix2(
             znear=0.01,
             zfar=100.0,
@@ -336,122 +326,80 @@ class FrontEnd(mp.Process):
             W=self.dataset.width,
             H=self.dataset.height,
         ).transpose(0, 1)
-        # 将投影矩阵移动到指定设备
         projection_matrix = projection_matrix.to(device=self.device)
-        # 创建计时器
         tic = torch.cuda.Event(enable_timing=True)
         toc = torch.cuda.Event(enable_timing=True)
-
+        track_duration = 0.0
+        count = 0
         while True:
-            # 如果可视化队列为空
             if self.q_vis2main.empty():
-                # 如果暂停，则继续
                 if self.pause:
                     continue
             else:
-                # 获取可视化队列中的数据
                 data_vis2main = self.q_vis2main.get()
-                # 设置暂停标志
                 self.pause = data_vis2main.flag_pause
-                # 如果暂停，则将暂停信号放入后台队列
                 if self.pause:
                     self.backend_queue.put(["pause"])
                     continue
                 else:
-                    # 否则，将取消暂停信号放入后台队列
                     self.backend_queue.put(["unpause"])
 
-            # 如果前台队列为空
             if self.frontend_queue.empty():
-                # 记录开始时间
                 tic.record()
-                # 如果当前帧索引大于等于数据集长度
                 if cur_frame_idx >= len(self.dataset):
-                    # 如果保存结果，则评估ATE
                     if self.save_results:
-                        eval_ate(
-                            self.cameras,
-                            self.kf_indices,
-                            self.save_dir,
-                            0,
-                            final=True,
-                            monocular=self.monocular,
-                        )
+                        # eval_ate(
+                        #     self.cameras,
+                        #     self.kf_indices,
+                        #     self.save_dir,
+                        #     0,
+                        #     final=True,
+                        #     monocular=self.monocular,
+                        # )
                         save_gaussians(
                             self.gaussians, self.save_dir, "final", final=True
                         )
-                    # 退出循环
                     break
 
-                # 如果请求初始化，则等待0.01秒
                 if self.requested_init:
                     time.sleep(0.01)
                     continue
 
-                # 如果单线程且请求关键帧大于0，则等待0.01秒
                 if self.single_thread and self.requested_keyframe > 0:
                     time.sleep(0.01)
                     continue
 
-                # 如果未初始化且请求关键帧大于0，则等待0.01秒
                 if not self.initialized and self.requested_keyframe > 0:
                     time.sleep(0.01)
                     continue
-
-                # 从数据集中获取当前帧的相机视角
+                # 从数据集中获取当前帧的相机视点（idx、gt rgb、depth、pose、proj、fx、fy、fovx、fovy、h、w、plane_info）
                 viewpoint = Camera.init_from_dataset(
                     self.dataset, cur_frame_idx, projection_matrix
                 )
-                # 计算梯度掩码
                 viewpoint.compute_grad_mask(self.config)
 
-                # 将当前帧的相机视角添加到相机列表中
                 self.cameras[cur_frame_idx] = viewpoint
 
-                # 如果重置，则初始化当前帧索引和相机视角
                 if self.reset:
                     self.initialize(cur_frame_idx, viewpoint)
                     self.current_window.append(cur_frame_idx)
                     cur_frame_idx += 1
                     continue
 
-                # 如果当前窗口大小等于窗口大小，则初始化
                 self.initialized = self.initialized or (
                     len(self.current_window) == self.window_size
                 )
 
+                track_start_time = time.time()
                 # Tracking
                 render_pkg = self.tracking(cur_frame_idx, viewpoint)
-                # render_img = render_pkg["render"]  # 或者改成 render_pkg["rgb"]，看你那边叫什么
-
-
-                # # 如果是 GPU Tensor，要先搬到 CPU
-                # if render_img.is_cuda:
-                #     render_img = render_img.cpu()
-
-                # # 如果有 batch 维度 [B, C, H, W]，取第0个
-                # if render_img.ndim == 4:
-                #     render_img = render_img[0]
-
-                # # 确保是 (H, W, C) 格式
-                # if render_img.shape[0] == 3:  # [C, H, W] 形式
-                #     render_img = render_img.permute(1, 2, 0)
-
-                # # 有些渲染结果可能是 [-1, 1] 的，需要处理一下
-                # render_img = (render_img.clamp(0, 1)).detach().numpy()
-
-                # plt.figure(figsize=(8, 6))
-                # plt.imshow(render_img)
-                # plt.axis("off")
-                # plt.title(f"Rendered Frame {cur_frame_idx}")
-                # plt.show()
-
-
-
+                count+=1
+                track_end_time = time.time()
+                track_duration += track_end_time - track_start_time
                 current_window_dict = {}
                 current_window_dict[self.current_window[0]] = self.current_window[1:]
                 keyframes = [self.cameras[kf_idx] for kf_idx in self.current_window]
-                # print(f" gaussian - conutrt  {len(keyframes)}")
+                # self.gaussians.load_ply("/home/guowenwu/workspace/indoor_GS_SLAM/RGBD_GS_SLAM/2_results/replica_room1/2025-06-12-20-06-06/point_cloud/final/point_cloud.ply")
                 self.q_main2vis.put(
                     gui_utils.GaussianPacket(
                         gaussians=clone_obj(self.gaussians),
@@ -469,7 +417,6 @@ class FrontEnd(mp.Process):
                 last_keyframe_idx = self.current_window[0]
                 check_time = (cur_frame_idx - last_keyframe_idx) >= self.kf_interval
                 curr_visibility = (render_pkg["n_touched"] > 0).long()
-                print("curr_visibility nonzero count:", curr_visibility.sum().item()," vount ",cur_frame_idx)
                 create_kf = self.is_keyframe(
                     cur_frame_idx,
                     last_keyframe_idx,
@@ -552,3 +499,12 @@ class FrontEnd(mp.Process):
                 elif data[0] == "stop":
                     Log("Frontend Stopped.")
                     break
+        
+        tracking_iters = 100*count
+        # === 打印汇总统计 ===
+        avg_tracking_iter = track_duration/ tracking_iters * 1000  # ms
+        avg_tracking_frame = track_duration/ count  # s
+
+        print(f"\n--- Performance Summary ---")
+        print(f"Average Tracking/Iteration Time: {avg_tracking_iter:.6f} ms")
+        print(f"Average Tracking/Frame Time:     {avg_tracking_frame:.6f} s")

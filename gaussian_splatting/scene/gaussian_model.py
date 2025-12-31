@@ -20,6 +20,8 @@ from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2
 from torch import nn
 
+from sklearn.neighbors import NearestNeighbors
+from collections import deque
 from gaussian_splatting.utils.general_utils import (
     build_rotation,
     build_scaling_rotation,
@@ -44,6 +46,7 @@ class GaussianModel:
         self._scaling = torch.empty(0, device="cuda")
         self._rotation = torch.empty(0, device="cuda")
         self._opacity = torch.empty(0, device="cuda")
+        self._point_labels = torch.empty(0, device="cuda")
         self.max_radii2D = torch.empty(0, device="cuda")
         self.xyz_gradient_accum = torch.empty(0, device="cuda")
 
@@ -69,6 +72,16 @@ class GaussianModel:
 
         self.isotropic = False
         #----------------
+    def gather_gaussians_to_cpu(self):
+        return {
+            "xyz": self._xyz,
+            "f_dc": self._features_dc,
+            "f_rest": self._features_rest,
+            "scaling": self._scaling,
+            "rotation": self._rotation,
+            "opacity": self._opacity,
+            "labels": self._point_labels,
+        }
 
     def build_covariance_from_scaling_rotation(
         self, scaling, scaling_modifier, rotation
@@ -84,11 +97,23 @@ class GaussianModel:
 
     @property
     def get_rotation(self):
-        return self.rotation_activation(self._rotation)
+        print(f"rotation {self._rotation.shape}")
+        print(torch.isnan(self._rotation).sum())  # 检查是否有 NaN 值
+        print(torch.isinf(self._rotation).sum())  # 检查是否有 Inf 值
+        if self._rotation.size(0) == 0 or self._rotation.size(1) == 0:
+            print("Error: Rotation tensor has a dimension of 0.")
+            default_rotation = torch.zeros(7926, 4)  # 或者其他合适的默认值
+            return default_rotation 
+        else:
+            return self.rotation_activation(self._rotation)
 
     @property
     def get_xyz(self):
         return self._xyz
+    
+    @property
+    def get_labels(self):
+        return self._point_labels
 
     @property
     def get_features(self):
@@ -135,164 +160,408 @@ class GaussianModel:
 
         return self.create_pcd_from_image_and_depth(cam, rgb, depth, init)
 
-    def create_pcd_from_image_and_depth(self, cam, rgb, depth, init=False):
-        if init:
-            downsample_factor = self.config["Dataset"]["pcd_downsample_init"]
-        else:
-            downsample_factor = self.config["Dataset"]["pcd_downsample"]
-        point_size = self.config["Dataset"]["point_size"]
-        if "adaptive_pointsize" in self.config["Dataset"]:
-            if self.config["Dataset"]["adaptive_pointsize"]:
-                point_size = min(0.05, point_size * np.median(depth))
-        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
-            rgb,
-            depth,
-            depth_scale=1.0,
-            depth_trunc=100.0,
-            convert_rgb_to_intensity=False,
-        )
-
-        W2C = getWorld2View2(cam.R, cam.T).cpu().numpy()
-        pcd_tmp = o3d.geometry.PointCloud.create_from_rgbd_image(
-            rgbd,
-            o3d.camera.PinholeCameraIntrinsic(
-                cam.image_width,
-                cam.image_height,
-                cam.fx,
-                cam.fy,
-                cam.cx,
-                cam.cy,
-            ),
-            extrinsic=W2C,
-            project_valid_depth_only=True,
-        )
-        pcd_tmp = pcd_tmp.random_down_sample(1.0 / downsample_factor)
-        new_xyz = np.asarray(pcd_tmp.points)
-        new_rgb = np.asarray(pcd_tmp.colors)
-
-        # 获取 cam 中的 plane_info
-        plane_centers = torch.stack([torch.tensor(p['center'], device='cuda') for p in cam.plane_info], dim=0)
-        plane_normals = torch.stack([torch.tensor(p['normal'], device='cuda') for p in cam.plane_info], dim=0)
-        
-        #   # 将数据从 CUDA 转移到 CPU
-        # plane_centers = plane_centers.cpu().numpy()
-        # plane_normals = plane_normals.cpu().numpy()
-        # scale_factor = 600.0
-        # plane_centers /= scale_factor
-        # # 创建一个空的点云对象
-        # point_cloud = o3d.geometry.PointCloud()
-
-        # # 将平面中心点添加到点云中
-        # point_cloud.points = o3d.utility.Vector3dVector(plane_centers)
-
-        # # 创建法线向量
-        # lines = []
-        # for i in range(len(plane_centers)):
-        #     lines.append([i, i])  # 每个点的法线线段是从平面中心点到法线方向
-
-        # # 生成法线的起点和终点
-        # line_points = []
-        # for i in range(len(plane_centers)):
-        #     start = plane_centers[i]
-        #     end = plane_centers[i] + plane_normals[i] * 8  # 法线长度为0.1
-        #     line_points.append(start)
-        #     line_points.append(end)
-
-        # # 转换成 Open3D 的线段格式
-        # lines = np.array(lines)
-        # line_points = np.array(line_points)
-
-        # # 创建线段几何体
-        # line_set = o3d.geometry.LineSet()
-        # line_set.points = o3d.utility.Vector3dVector(line_points)
-        # line_set.lines = o3d.utility.Vector2iVector(lines)
-
-        # # 设置线段的颜色为红色
-        # line_set.paint_uniform_color([1, 0, 0])  # 红色
 
 
-        pcd = BasicPointCloud(
-            points=new_xyz, colors=new_rgb, normals=np.zeros((new_xyz.shape[0], 3))
-        )
-        self.ply_input = pcd
+    def region_growing(self,xyz, normals, radius=0.5, angle_threshold=np.deg2rad(15), min_cluster_size=400):
+        """
+        :param xyz: (N, 3) 点坐标
+        :param normals: (N, 3) 点的单位法向量
+        :param radius: 邻域半径
+        :param angle_threshold: 法向夹角阈值（弧度）
+        :param min_cluster_size: 最小平面点数
+        :return: list of clusters，每个是索引数组
+        """
+        N = xyz.shape[0]
+        visited = np.zeros(N, dtype=bool)
+        clusters = []
 
-        fused_point_cloud = torch.from_numpy(np.asarray(pcd.points)).float().cuda()
-        fused_color = RGB2SH(torch.from_numpy(np.asarray(pcd.colors)).float().cuda())
-        features = (
-            torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2))
-            .float()
-            .cuda()
-        )
-        features[:, :3, 0] = fused_color
-        features[:, 3:, 1:] = 0.0
+        # 建立 KD-Tree 查找邻居
+        nbrs = NearestNeighbors(radius=radius).fit(xyz)
 
-        fused_point_cloud_original = fused_point_cloud.clone()
-        print(f"plane_centers :{plane_centers} {plane_normals} dian {fused_point_cloud_original}")
-       # 计算每个点到平面的距离，并根据最近的平面选择进行投影
-        eps = 3  # 设置一个距离阈值，只有接近平面的点才会修改
-        for idx, point in enumerate(fused_point_cloud):
-            # 计算每个点到所有平面的距离
-            dist_to_planes = torch.abs(torch.sum((point - plane_centers) * plane_normals, dim=1))  # [P]
+        for idx in range(N):
+            if visited[idx]:
+                continue
 
-            # 找到距离点最近的平面索引
-            plane_idx = torch.argmin(dist_to_planes)
+            # 初始化一个新区域
+            queue = deque([idx])
+            visited[idx] = True
+            cluster = [idx]
 
-            # 获取最近平面的中心和法线
-            vec_to_plane = point - plane_centers[plane_idx]  # 点到平面的向量
-            normal = plane_normals[plane_idx]
+            while queue:
+                curr_idx = queue.popleft()
+                curr_normal = normals[curr_idx]
+                _, neighbors = nbrs.radius_neighbors([xyz[curr_idx]], return_distance=True)
 
-            # 计算点到平面的距离
-            dist_to_plane = torch.abs(torch.dot(vec_to_plane, normal))
+                for neighbor_idx in neighbors[0]:
+                    if visited[neighbor_idx]:
+                        continue
+                    # 法向夹角小于阈值才合并
+                    angle = np.arccos(np.clip(np.dot(curr_normal, normals[neighbor_idx]), -1.0, 1.0))
+                    if angle < angle_threshold:
+                        visited[neighbor_idx] = True
+                        queue.append(neighbor_idx)
+                        cluster.append(neighbor_idx)
 
-            # 如果点接近平面（距离小于阈值），就投影到平面上
-            print(f'dist_to_plane :{dist_to_plane}  ')
-            if dist_to_plane < eps:
-                projection = vec_to_plane - torch.dot(vec_to_plane, normal) * normal  # 投影到平面
-                fused_point_cloud[idx] = plane_centers[plane_idx] + projection 
+            if len(cluster) >= min_cluster_size:
+                clusters.append(np.array(cluster))
+                break
 
-
-        # 将修改前后的点云分别转换为Open3D格式以进行可视化
+        return clusters
+    def fit_plane_svd(self,points):
+        """
+        对输入点集拟合平面，返回法向量和中心点
+        :param points: (M, 3) array
+        :return: normal: (3,), center: (3,)
+        """
+        center = points.mean(axis=0)
+        _, _, vh = np.linalg.svd(points - center)
+        normal = vh[2, :]
+        # 方向统一化：确保法向量朝上（或者其他一致的方向）
+        if normal[2] < 0:
+            normal = -normal
+        return normal, center
+    def visualize_before_and_after(self,xyz, normals, adjusted_xyz, adjusted_normals):
+        # 创建原始点云
         pcd_original = o3d.geometry.PointCloud()
-        pcd_modified = o3d.geometry.PointCloud()
+        pcd_original.points = o3d.utility.Vector3dVector(xyz)
+        pcd_original.normals = o3d.utility.Vector3dVector(normals)
+        pcd_original.paint_uniform_color([0.7, 0.7, 0.7])  # 灰色
 
-        # 生成原始点云
-        pcd_original.points = o3d.utility.Vector3dVector(fused_point_cloud_original.cpu().numpy())
-        pcd_original.colors = o3d.utility.Vector3dVector(np.ones_like(fused_point_cloud_original.cpu().numpy())*[0,1,0])  # 设置为白色
+        # 创建调整后的点云
+        pcd_adjusted = o3d.geometry.PointCloud()
+        pcd_adjusted.points = o3d.utility.Vector3dVector(adjusted_xyz)
+        pcd_adjusted.normals = o3d.utility.Vector3dVector(adjusted_normals)
+        pcd_adjusted.paint_uniform_color([1.0, 0.0, 0.0])  # 绿色
 
-        # 生成修改后的点云
-        pcd_modified.points = o3d.utility.Vector3dVector(fused_point_cloud.cpu().numpy())
-        pcd_modified.colors = o3d.utility.Vector3dVector(np.zeros_like(fused_point_cloud.cpu().numpy()))  # 设置为黑色
+        # 可视化
+        o3d.visualization.draw_geometries([pcd_original, pcd_adjusted])
 
-        # 可视化修改前后的点云
-        o3d.visualization.draw_geometries([pcd_original,pcd_modified])
+    def point_to_plane_distance(self,point, plane_center, plane_normal):
+        """
+        计算点到平面的距离，并返回调整后的点。
+        :param point: 点的位置 (3,)
+        :param plane_center: 平面的中心点 (3,)
+        :param plane_normal: 平面的法向量 (3,)
+        :return: 距离、调整后的点
+        """
+        # 计算点到平面的向量
+        point_to_plane_vector = point - plane_center
+        # 点到平面的距离（点到平面的投影长度）
+        distance = np.dot(point_to_plane_vector, plane_normal)
+        # 调整后的点
+        adjusted_point = point - distance * plane_normal
+        return distance, adjusted_point
 
-        dist2 = (
-            torch.clamp_min(
-                distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()),
-                0.0000001,
+    def adjust_points_to_planes(self,xyz, planes,normals, distance_threshold=0.1):
+        """
+        调整点到平面上，并更新每个点的法向量。
+        :param xyz: 点坐标 (N, 3)
+        :param planes: 包含平面信息的列表，每个平面包含 {"normal": normal, "center": center, "indices": indices}
+        :param distance_threshold: 距离阈值，表示点到平面距离小于此值则进行调整
+        :return: 更新后的点坐标和法向量
+        """
+        # 存储调整后的点坐标和法向量
+        adjusted_xyz = np.copy(xyz)
+        adjusted_normals = np.copy(normals)
+
+        # 对于每个平面
+        for plane in planes:
+            normal = plane["normal"]
+            center = plane["center"]
+            cluster_indices = plane["indices"]
+
+            # 对于平面上的每个点
+            for idx in cluster_indices:
+                point = xyz[idx]
+                # 计算点到平面的距离
+                distance, adjusted_point = self.point_to_plane_distance(point, center, normal)
+              
+                # 如果距离小于阈值，调整该点
+                if np.abs(distance) < distance_threshold:
+                    adjusted_xyz[idx] = adjusted_point
+                    adjusted_normals[idx] = normal  # 更新法向量为平面的法向量
+
+        return adjusted_xyz, adjusted_normals
+    def transform_planes_to_world(self,plane_centers_cam, plane_normals_cam, R, T):
+        """
+        直接用 R, T 将相机坐标系下的平面中心和法向量转到世界坐标系。
+        假设 R, T 是世界到相机（W2C）。
+
+        Args:
+            plane_centers_cam (torch.Tensor): [P, 3]，相机系下平面中心点
+            plane_normals_cam (torch.Tensor): [P, 3]，相机系下平面法向量
+            R (np.ndarray or torch.Tensor): [3, 3]，世界到相机的旋转矩阵
+            T (np.ndarray or torch.Tensor): [3,]，世界到相机的平移向量
+
+        Returns:
+            plane_centers_world (torch.Tensor): [P, 3]
+            plane_normals_world (torch.Tensor): [P, 3]
+        """
+        # if isinstance(R, np.ndarray):
+        #     R = torch.from_numpy(R).to(dtype=torch.float32, device=plane_centers_cam.device)
+        # else:
+        #     R = R.to(dtype=torch.float32, device=plane_centers_cam.device)
+
+        # if isinstance(T, np.ndarray):
+        #     T = torch.from_numpy(T).to(dtype=torch.float32, device=plane_centers_cam.device)
+        # else:
+        #     T = T.to(dtype=torch.float32, device=plane_centers_cam.device)
+
+
+        # # 世界到相机 -> 相机到世界： x_world = Rᵀ @ (x_cam - T)
+        # R_t = R.transpose(0, 1)  # Rᵀ
+        # centers_translated = plane_centers_cam - T  # [P, 3]
+        # plane_centers_world = (R_t @ centers_translated.T).T
+
+        # # 法向量只需旋转
+        # plane_normals_world = (R_t @ plane_normals_cam.T).T
+        # plane_normals_world = torch.nn.functional.normalize(plane_normals_world, dim=1)
+        # return plane_centers_world, plane_normals_world
+        x = plane_centers_cam[:, 0]
+        y = plane_centers_cam[:, 1]
+        z = plane_centers_cam[:, 2]
+        transformed_centers = torch.stack([z, -y, x], dim=1)
+
+        x = plane_normals_cam[:, 0]
+        y = plane_normals_cam[:, 1]
+        z = plane_normals_cam[:, 2]
+        transformed_normals = torch.stack([z, -y, x], dim=1)
+        return transformed_centers, transformed_normals
+    def rotate_planes_to_z(self,centers, normals):
+        # 目标法向量
+        target = torch.tensor([0, 0, 1], dtype=torch.float32, device=normals.device).expand_as(normals)
+        normals = torch.nn.functional.normalize(normals, dim=-1)
+
+        # 旋转轴：法向量和目标向量的叉乘
+        axis = torch.cross(normals, target, dim=1)
+        axis_norm = torch.norm(axis, dim=1, keepdim=True)
+        axis = axis / (axis_norm + 1e-8)
+
+        # 角度
+        cos = torch.clamp(torch.sum(normals * target, dim=1), -1.0, 1.0)
+        angle = torch.acos(cos)
+
+        # Rodrigues 旋转公式
+        K = torch.zeros((centers.shape[0], 3, 3), device=normals.device)
+        K[:, 0, 1] = -axis[:, 2]
+        K[:, 0, 2] = axis[:, 1]
+        K[:, 1, 0] = axis[:, 2]
+        K[:, 1, 2] = -axis[:, 0]
+        K[:, 2, 0] = -axis[:, 1]
+        K[:, 2, 1] = axis[:, 0]
+
+        I = torch.eye(3, device=normals.device).expand(centers.shape[0], 3, 3)
+        angle = angle.view(-1, 1, 1)
+        R = I + torch.sin(angle) * K + (1 - torch.cos(angle)) * (K @ K)
+
+        # 旋转所有平面中心
+        centers_rot = torch.bmm(R, centers.unsqueeze(-1)).squeeze(-1)
+        normals_rot = torch.bmm(R, normals.unsqueeze(-1)).squeeze(-1)
+
+        return centers_rot, normals_rot
+
+
+    def assign_plane_labels_to_open3d_points(self, xyz, cam_intrinsics, label_data, invalid_mask, w2c):
+        # return np.full((xyz.shape[0],), -1, dtype=np.int32) 
+        """
+        给 Open3D 点云中的每个点分配图像平面标签（支持世界坐标 → 像素投影）。
+        """
+        try:
+            # === 1. 世界坐标 → 齐次相机坐标 ===
+            N = xyz.shape[0]
+            xyz_h = np.concatenate([xyz, np.ones((N, 1))], axis=1).T  # [4, N]
+            cam_xyz_h = (w2c @ xyz_h).T  # [N, 4]
+            cam_xyz = cam_xyz_h[:, :3]
+            x, y, z = cam_xyz[:, 0], cam_xyz[:, 1], cam_xyz[:, 2]
+
+            # === 2. 相机坐标 → 图像像素 ===
+            u = np.round((x * cam_intrinsics.fx) / z + cam_intrinsics.cx).astype(int)
+            v = np.round((y * cam_intrinsics.fy) / z + cam_intrinsics.cy).astype(int)
+
+            # === 3. 投影合法性检查 ===
+            valid = (u >= 0) & (u < cam_intrinsics.image_width) & \
+                    (v >= 0) & (v < cam_intrinsics.image_height) & (z > 0)
+            point_plane_labels = np.full((N,), -1, dtype=np.int32)
+
+            # === 4. 提取标签 ===
+            u_valid = u[valid]
+            v_valid = v[valid]
+
+            # 检查 label_data 和 invalid_mask 是否为二维
+            # assert label_data.ndim == 2, f"label_data should be 2D but got shape {label_data.shape}"
+            # assert invalid_mask.ndim == 2, f"invalid_mask should be 2D but got shape {invalid_mask.shape}"
+
+            labels = label_data[v_valid, u_valid]
+            invalid = invalid_mask[v_valid, u_valid]
+            labels[invalid] = -1
+
+            point_plane_labels[valid] = labels
+
+            return point_plane_labels
+
+        except Exception as e:
+            print("[assign_plane_labels_to_open3d_points] 错误:", str(e))
+            import traceback
+            traceback.print_exc()
+            return np.full((xyz.shape[0],), -1, dtype=np.int32)  # 返回全部为 -1，表示失败
+
+
+
+    def visualize_point_cloud_with_labels(self, xyz, point_plane_labels, visible_labels=[0,1,3,4,5,6]):
+        """
+        给指定标签着色，其他设为灰色。
+
+        参数：
+            xyz (np.ndarray): 点云坐标 [N, 3]
+            point_plane_labels (np.ndarray): 标签 [N]
+            visible_labels (list or set, optional): 只高亮显示这些标签
+        """
+        # 创建 Open3D 点云对象
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(xyz)
+
+        labels = point_plane_labels
+        cmap = plt.get_cmap("tab20")
+        colors = np.zeros((len(labels), 3))
+
+        for i, label in enumerate(np.unique(labels)):
+            mask = labels == label
+            if visible_labels is not None and label not in visible_labels:
+                colors[mask] = [0.5, 0.5, 0.5]  # 灰色
+            else:
+                color = cmap(i % 20)[:3]
+                colors[mask] = color
+
+        pcd.colors = o3d.utility.Vector3dVector(colors)
+        o3d.visualization.draw_geometries([pcd])
+
+
+    def create_pcd_from_image_and_depth(self, cam, rgb, depth, init=False):
+            if init:
+                downsample_factor = self.config["Dataset"]["pcd_downsample_init"]
+            else:
+                downsample_factor = self.config["Dataset"]["pcd_downsample"]
+            point_size = self.config["Dataset"]["point_size"]
+            if "adaptive_pointsize" in self.config["Dataset"]:
+                if self.config["Dataset"]["adaptive_pointsize"]:
+                    point_size = min(0.05, point_size * np.median(depth))
+            
+            rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+                rgb,
+                depth,
+                depth_scale=1.0,
+                depth_trunc=100.0,
+                convert_rgb_to_intensity=False,
             )
-            * point_size
-        )
-        scales = torch.log(torch.sqrt(dist2))[..., None]
-        if not self.isotropic:
-            scales = scales.repeat(1, 3)
 
-        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
-        rots[:, 0] = 1
-        opacities = inverse_sigmoid(
-            0.5
-            * torch.ones(
-                (fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"
+            W2C = getWorld2View2(cam.R, cam.T).cpu().numpy()
+            # print("W2C" ,rgbd.shape)
+            pcd_tmp = o3d.geometry.PointCloud.create_from_rgbd_image(
+                rgbd,
+                o3d.camera.PinholeCameraIntrinsic(
+                    cam.image_width,
+                    cam.image_height,
+                    cam.fx,
+                    cam.fy,
+                    cam.cx,
+                    cam.cy,
+                ),
+                extrinsic=W2C,
+                project_valid_depth_only=True,
             )
-        )
+            pcd_tmp = pcd_tmp.random_down_sample(1.0 / downsample_factor)
 
-        return fused_point_cloud, features, scales, rots, opacities
+            pcd_tmp.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=1.0, max_nn=1500))
+            pcd_tmp.normalize_normals()
+            # pcd_dense = o3d.geometry.PointCloud.create_from_rgbd_image(
+            #     rgbd,
+            #     o3d.camera.PinholeCameraIntrinsic(
+            #         cam.image_width,
+            #         cam.image_height,
+            #         cam.fx,
+            #         cam.fy,
+            #         cam.cx,
+            #         cam.cy,
+            #     )
+            # )
+
+            # pcd_dense.estimate_normals(
+            #     search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=1.0, max_nn=30)
+            # )
+
+            # # 获取每个点的法线
+            # normals = np.asarray(pcd_dense.normals)
+            # points = np.asarray(pcd_dense.points)
+
+            # # 重新投影这些点回图像
+            # x, y, z = points[:, 0], points[:, 1], points[:, 2]
+            # z[z == 0] = 1e-6
+            # u = (cam.fx * x / z + cam.cx).astype(np.int32)
+            # v = (cam.fy * y / z + cam.cy).astype(np.int32)
+
+            # # 过滤合法范围
+            # valid = (u >= 0) & (u < cam.image_width) & (v >= 0) & (v < cam.image_height)
+
+            # normals_color = ((normals + 1.0) / 2.0 * 255).astype(np.uint8)
+            # normal_image = np.zeros((cam.image_height, cam.image_width, 3), dtype=np.uint8)
+            # normal_image[v[valid], u[valid]] = normals_color[valid]
+
+            # import imageio
+            # imageio.imwrite("dense_normal_map.png", normal_image)
+            # print("Dense normal map saved.")
+
+            xyz = np.asarray(pcd_tmp.points)
+            rgb_np = np.asarray(pcd_tmp.colors)
+            normals = np.asarray(pcd_tmp.normals)
+            label_np_list = cam.plane_info['label_data']
+            invalid_mask_array_list = cam.plane_info['invalid_mask']
+            point_plane_labels = self.assign_plane_labels_to_open3d_points(xyz,cam, label_np_list, invalid_mask_array_list,W2C)
+            print(point_plane_labels.shape,xyz.shape)
+            # === 保持原逻辑 ===
+            pcd = BasicPointCloud(
+                points=xyz, colors=rgb_np, normals=normals
+            )
+            self.ply_input = pcd
+
+            # self.visualize_point_cloud_with_labels(xyz, point_plane_labels)
+            point_plane_labels = torch.from_numpy(point_plane_labels).float().cuda()
+            fused_point_cloud = torch.from_numpy(np.asarray(pcd.points)).float().cuda()
+            fused_color = RGB2SH(torch.from_numpy(np.asarray(pcd.colors)).float().cuda())
+            features = (
+                torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2))
+                .float()
+                .cuda()
+            )
+            features[:, :3, 0] = fused_color
+            features[:, 3:, 1:] = 0.0
+
+            dist2 = (
+                torch.clamp_min(
+                    distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()),
+                    0.0000001,
+                )
+                * point_size
+            )
+            scales = torch.log(torch.sqrt(dist2))[..., None]
+            if not self.isotropic:
+                scales = scales.repeat(1, 3)
+
+            rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+            rots[:, 0] = 1
+            opacities = inverse_sigmoid(
+                0.5
+                * torch.ones(
+                    (fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"
+                )
+            )
+
+            return fused_point_cloud, features, scales, rots, opacities,point_plane_labels
 
     def init_lr(self, spatial_lr_scale):
         self.spatial_lr_scale = spatial_lr_scale
 
     def extend_from_pcd(
-        self, fused_point_cloud, features, scales, rots, opacities, kf_id
+        self, fused_point_cloud, features, scales, rots, opacities, kf_id,point_plane_labels
     ):
         new_xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         new_features_dc = nn.Parameter(
@@ -304,6 +573,7 @@ class GaussianModel:
         new_scaling = nn.Parameter(scales.requires_grad_(True))
         new_rotation = nn.Parameter(rots.requires_grad_(True))
         new_opacity = nn.Parameter(opacities.requires_grad_(True))
+        new_points_label = nn.Parameter(point_plane_labels.requires_grad_(True))
 
         new_unique_kfIDs = torch.ones((new_xyz.shape[0])).int() * kf_id
         new_n_obs = torch.zeros((new_xyz.shape[0])).int()
@@ -316,16 +586,17 @@ class GaussianModel:
             new_rotation,
             new_kf_ids=new_unique_kfIDs,
             new_n_obs=new_n_obs,
+            new_points_label = new_points_label
         )
 
     def extend_from_pcd_seq(
         self, cam_info, kf_id=-1, init=False, scale=2.0, depthmap=None
     ):
-        fused_point_cloud, features, scales, rots, opacities = (
+        fused_point_cloud, features, scales, rots, opacities,point_plane_labels = (
             self.create_pcd_from_image(cam_info, init, scale=scale, depthmap=depthmap)
         )
         self.extend_from_pcd(
-            fused_point_cloud, features, scales, rots, opacities, kf_id
+            fused_point_cloud, features, scales, rots, opacities, kf_id,point_plane_labels
         )
 
     def training_setup(self, training_args):
@@ -363,6 +634,11 @@ class GaussianModel:
                 "params": [self._rotation],
                 "lr": training_args.rotation_lr,
                 "name": "rotation",
+            },
+            {
+                "params": [self._point_labels],
+                "lr": training_args.labels_lr,
+                "name": "labels",
             },
         ]
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
@@ -406,12 +682,19 @@ class GaussianModel:
             l.append("scale_{}".format(i))
         for i in range(self._rotation.shape[1]):
             l.append("rot_{}".format(i))
+        l.append("label")    
         return l
 
     def save_ply(self, path):
         mkdir_p(os.path.dirname(path))
 
         xyz = self._xyz.detach().cpu().numpy()
+        labels = self._point_labels.detach().cpu().numpy().astype(np.float32).reshape(-1, 1)
+        assert labels.shape[0] == xyz.shape[0], "Label count must match point count"
+        if self._features_dc.numel() == 0:
+            print("Warning: features_dc is empty, skipping save.")
+            return
+
         normals = np.zeros_like(xyz)
         f_dc = (
             self._features_dc.detach()
@@ -436,9 +719,10 @@ class GaussianModel:
         dtype_full = [
             (attribute, "f4") for attribute in self.construct_list_of_attributes()
         ]
+        dtype_full[-1] = ("label", "i4")
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
         attributes = np.concatenate(
-            (xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1
+            (xyz, normals, f_dc, f_rest, opacities, scale, rotation,labels), axis=1
         )
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, "vertex")
@@ -545,7 +829,86 @@ class GaussianModel:
         self._rotation = nn.Parameter(
             torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True)
         )
-        self.active_sh_degree = self.max_sh_degree
+        if "label" in plydata.elements[0].data.dtype.names:
+            labels = np.asarray(plydata.elements[0]["label"])
+            self._point_labels = torch.tensor(labels, dtype=torch.int32, device="cuda")
+        else:
+            print("No 'label' field found in PLY. Initializing empty label tensor.")
+            self._point_labels = torch.empty((xyz.shape[0],), dtype=torch.int32, device="cuda")
+        self.active_sh_degree = 0
+        # 定义你希望高亮显示的标签列表，例如只显示标签 1 和 3 为真彩，其余为灰色
+        highlight_labels = [1,0,3,4,5,6]
+        label_colors = torch.tensor([
+            [1.0, 0.0, 0.0],    # 红 0
+            [0.0, 1.0, 0.0],    # 绿 1
+            [0.0, 0.0, 1.0],    # 蓝 2
+            [1.0, 1.0, 0.0],    # 黄 3
+            [1.0, 0.0, 1.0],    # 品红 4
+            [0.0, 1.0, 1.0],    # 青 5
+            [1.0, 0.5, 0.0],    # 橙 6
+            [0.5, 0.0, 0.5],    # 紫 7
+            [0.0, 0.5, 0.5],    # 蓝绿 8
+            [0.5, 0.5, 0.0],    # 土黄  9
+            [0.5, 0.0, 0.0],    # 深红 10
+            [0.0, 0.5, 0.0],    # 深绿 11 
+            [0.0, 0.0, 0.5],    # 深蓝 12
+            [1.0, 0.8, 0.6],    # 肤色 13
+            [0.6, 0.4, 0.2],    # 棕色 14
+            [0.9, 0.1, 0.5],    # 粉紫 15
+            [0.4, 0.8, 0.0],    # 荧光绿 16
+            [0.3, 0.6, 0.9],    # 天蓝 17
+            [0.9, 0.3, 0.7],    # 桃红 18
+        ], dtype=torch.float32, device="cuda")  # shape: (20, 3)
+
+        label_indices = self._point_labels.long()
+
+        # 防止索引越界（label 值超出颜色表长度）
+        label_indices_safe = label_indices % 19
+
+        # 获取颜色，默认所有点都用 label color 映射
+        dc_colors = label_colors[label_indices_safe]
+
+        # 创建 mask：哪些点是要高亮显示颜色的（指定标签）
+        highlight_mask = torch.isin(label_indices, torch.tensor(highlight_labels, device="cuda"))
+
+        # 设置灰色值（你可以换成别的颜色）
+        gray_color = torch.tensor([0.5, 0.5, 0.5], device="cuda")
+
+        # 把不在 highlight_labels 中的点颜色设置为灰色
+        dc_colors[~highlight_mask] = gray_color  # ~ 取反，即非高亮标签
+
+        # 形状调整成 (N, 1, 3)
+        # self._features_dc = nn.Parameter(
+        #     dc_colors.unsqueeze(1).contiguous().requires_grad_(False)
+        # )
+
+        # features_rest 全设为 0，shape = (N, 1, SH_len - 1)
+        n_points = dc_colors.shape[0]
+        sh_dim = self.max_sh_degree  # 去掉 DC（3维）
+       # 你 transpose 之前就要设好 shape
+#         self._features_rest = nn.Parameter(
+#     torch.zeros((n_points, 3, 0), dtype=torch.float32, device="cuda").requires_grad_(False)
+# )
+
+        # 设置最大尺度阈值
+        max_scale_threshold = 0.001  # 可调整，例如单位是米，过大球不渲染
+
+        # scales: shape (N, 3)，取每点的最大尺度
+        max_per_point_scale = self._scaling.data.max(dim=1).values
+
+        # 创建 mask，保留尺度较小的高斯球
+        valid_scale_mask = max_per_point_scale < max_scale_threshold
+
+        # 用 mask 筛选所有相关字段
+        self._xyz = nn.Parameter(self._xyz.data[valid_scale_mask].requires_grad_(True))
+        self._features_dc = nn.Parameter(self._features_dc.data[valid_scale_mask].requires_grad_(False))
+        self._features_rest = nn.Parameter(self._features_rest.data[valid_scale_mask].requires_grad_(False))
+        self._opacity = nn.Parameter(self._opacity.data[valid_scale_mask].requires_grad_(True))
+        self._scaling = nn.Parameter(self._scaling.data[valid_scale_mask].requires_grad_(True))
+        self._rotation = nn.Parameter(self._rotation.data[valid_scale_mask].requires_grad_(True))
+        self._point_labels = self._point_labels[valid_scale_mask]
+
+
         self.max_radii2D = torch.zeros((self._xyz.shape[0]), device="cuda")
         self.unique_kfIDs = torch.zeros((self._xyz.shape[0]))
         self.n_obs = torch.zeros((self._xyz.shape[0]), device="cpu").int()
@@ -595,6 +958,7 @@ class GaussianModel:
         self._features_dc = optimizable_tensors["f_dc"]
         self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
+        self._point_labels = optimizable_tensors["labels"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
@@ -602,7 +966,6 @@ class GaussianModel:
 
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
-        # self.tmp_radii = self.tmp_radii[valid_points_mask]
         self.unique_kfIDs = self.unique_kfIDs[valid_points_mask.cpu()]
         self.n_obs = self.n_obs[valid_points_mask.cpu()]
 
@@ -650,6 +1013,7 @@ class GaussianModel:
         new_rotation,
         new_kf_ids=None,
         new_n_obs=None,
+        new_points_label=None
     ):
         d = {
             "xyz": new_xyz,
@@ -658,6 +1022,7 @@ class GaussianModel:
             "opacity": new_opacities,
             "scaling": new_scaling,
             "rotation": new_rotation,
+            "labels":new_points_label,
         }
 
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
@@ -667,16 +1032,16 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
-        print("densification_postfix ",new_kf_ids)
-        # self.tmp_radii = torch.cat((self.tmp_radii, new_tmp_radii))
-      
+        self._point_labels = optimizable_tensors["labels"]
+        
         with torch.no_grad():  # 不追踪计算图，避免 autograd 报错
             log_scaling = self._scaling
             scaling = torch.exp(log_scaling)
             min_scaling_idx = torch.argmin(scaling, dim=1)
 
             new_log_scaling = log_scaling.clone()
-            new_log_scaling[torch.arange(new_log_scaling.size(0)), min_scaling_idx] -= 2
+            new_log_scaling[torch.arange(new_log_scaling.size(0)), min_scaling_idx] -= 0.001
+
             self._scaling.data.copy_(new_log_scaling)
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -712,7 +1077,8 @@ class GaussianModel:
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N, 1, 1)
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N, 1, 1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N, 1)
-        # new_tmp_radii = self.tmp_radii[selected_pts_mask].repeat(N)
+
+        new_points_label = self._point_labels[selected_pts_mask].repeat(N)
 
         new_kf_id = self.unique_kfIDs[selected_pts_mask.cpu()].repeat(N)
         new_n_obs = self.n_obs[selected_pts_mask.cpu()].repeat(N)
@@ -726,6 +1092,7 @@ class GaussianModel:
             new_rotation,
             new_kf_ids=new_kf_id,
             new_n_obs=new_n_obs,
+            new_points_label=new_points_label,
         )
 
         prune_filter = torch.cat(
@@ -754,7 +1121,8 @@ class GaussianModel:
         new_opacities = self._opacity[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
-        # new_tmp_radii = self.tmp_radii[selected_pts_mask]
+
+        new_points_label = self._point_labels[selected_pts_mask]
 
         new_kf_id = self.unique_kfIDs[selected_pts_mask.cpu()]
         new_n_obs = self.n_obs[selected_pts_mask.cpu()]
@@ -767,15 +1135,13 @@ class GaussianModel:
             new_rotation,
             new_kf_ids=new_kf_id,
             new_n_obs=new_n_obs,
+            new_points_label=new_points_label,
         )
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
-        # 计算梯度
         grads = self.xyz_gradient_accum / self.denom
-        # 将NaN值替换为0
         grads[grads.isnan()] = 0.0
 
-        # self.tmp_radii = radii
         self.densify_and_clone(grads, max_grad, extent)
         self.densify_and_split(grads, max_grad, extent)
 
@@ -788,8 +1154,6 @@ class GaussianModel:
                 torch.logical_or(prune_mask, big_points_vs), big_points_ws
             )
         self.prune_points(prune_mask)
-        #   tmp_radii = self.tmp_radii
-        # self.tmp_radii = None
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(

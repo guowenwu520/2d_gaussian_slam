@@ -15,7 +15,7 @@ from matplotlib import pyplot as plt
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 import wandb
-from gaussian_splatting.gaussian_renderer import render
+from gaussian_splatting.gaussian_render import render
 from gaussian_splatting.utils.image_utils import psnr
 from gaussian_splatting.utils.loss_utils import ssim
 from gaussian_splatting.utils.system_utils import mkdir_p
@@ -24,18 +24,14 @@ from utils.logging_utils import Log
 
 def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False):
     ## Plot
-    # 创建参考轨迹和估计轨迹
     traj_ref = PosePath3D(poses_se3=poses_gt)
     traj_est = PosePath3D(poses_se3=poses_est)
-    # 对估计轨迹进行对齐
     traj_est_aligned = trajectory.align_trajectory(
         traj_est, traj_ref, correct_scale=monocular
     )
 
     ## RMSE
-    # 定义姿态关系为平移部分
     pose_relation = metrics.PoseRelation.translation_part
-    # 处理数据
     data = (traj_ref, traj_est_aligned)
     ape_metric = metrics.APE(pose_relation)
     ape_metric.process_data(data)
@@ -134,12 +130,14 @@ def eval_rendering(
     cal_lpips = LearnedPerceptualImagePatchSimilarity(
         net_type="alex", normalize=True
     ).to("cuda")
+    render_dir = os.path.join(save_dir, "rendering")
+    mkdir_p(render_dir)
     for idx in range(0, end_idx, interval):
         if idx in kf_indices:
             continue
         saved_frame_idx.append(idx)
         frame = frames[idx]
-        gt_image, _, _ , _= dataset[idx]
+        gt_image, _, _,_ = dataset[idx]
 
         rendering = render(frame, gaussians, pipe, background)["render"]
         image = torch.clamp(rendering, 0.0, 1.0)
@@ -150,6 +148,7 @@ def eval_rendering(
         )
         gt = cv2.cvtColor(gt, cv2.COLOR_BGR2RGB)
         pred = cv2.cvtColor(pred, cv2.COLOR_BGR2RGB)
+        cv2.imwrite(f"{render_dir}/pred_{idx}.png", pred)
         img_pred.append(pred)
         img_gt.append(gt)
 

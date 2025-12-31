@@ -16,25 +16,56 @@ except Exception:
     pass
 
 
-class ReplicaParser:
-    def __init__(self, input_folder):
-        self.input_folder = input_folder
-        self.color_paths = sorted(glob.glob(f"{self.input_folder}/results/frame*.jpg"))
-        self.depth_paths = sorted(glob.glob(f"{self.input_folder}/results/depth*.png"))
-        self.n_img = len(self.color_paths)
-        self.load_poses(f"{self.input_folder}/traj.txt")
 
-    def load_poses(self, path):
+class ReplicaParser:
+    def __init__(self, input_folder, start=0, end=None):
+        self.input_folder = input_folder
+
+        # 全部路径读取
+        #-----------rgbd plane detection ----------
+        self.all_color_paths = sorted(glob.glob(f"{self.input_folder}/results/frame*.jpg"))
+        self.all_depth_paths = sorted(glob.glob(f"{self.input_folder}/results/depth*.png"))
+        self.all_plane_info = sorted(glob.glob(f"{self.input_folder}/plane/frame*_label.txt")) # 该语义是rgbd plane detection生成的
+        #----------zeroplane replica----------
+        # self.all_color_paths = sorted(glob.glob(f"{self.input_folder}/image/*.jpg"))
+        # self.all_depth_paths = sorted(glob.glob(f"{self.input_folder}/depth/depth*.png"))
+        # self.all_plane_info = sorted(glob.glob(f"{self.input_folder}/label/*.txt"))
+
+        # 设置默认终止索引
+        if end is None:
+            end = len(self.all_color_paths)
+
+        # 切片选择指定范围
+        self.color_paths = self.all_color_paths[start:end]
+        self.depth_paths = self.all_depth_paths[start:end]
+        self.plane_info = self.all_plane_info[start:end]
+        # print("color_paths", self.color_paths)
+
+        self.is_plane_info = True
+        self.n_img = len(self.color_paths)
+
+        # 存储用于后续用途（可选）
+        self.start = start
+        self.end = end
+
+        # 加载对应范围内的 pose
+        self.load_poses(f"{self.input_folder}/traj.txt", start, end)
+
+    def load_poses(self, path, start, end):
         self.poses = []
         with open(path, "r") as f:
             lines = f.readlines()
 
+        # 根据 start 和 end 读取部分 pose
+        lines = lines[start:end]
+
         frames = []
-        for i in range(self.n_img):
-            line = lines[i]
+        for i, line in enumerate(lines):
             pose = np.array(list(map(float, line.split()))).reshape(4, 4)
             pose = np.linalg.inv(pose)
+
             self.poses.append(pose)
+
             frame = {
                 "file_path": self.color_paths[i],
                 "depth_path": self.depth_paths[i],
@@ -42,7 +73,9 @@ class ReplicaParser:
             }
 
             frames.append(frame)
+
         self.frames = frames
+
 
 
 class TUMParser:
@@ -56,23 +89,29 @@ class TUMParser:
         return data
 
     def associate_frames(self, tstamp_image, tstamp_depth, tstamp_pose, max_dt=0.08):
-        associations = []
-        for i, t in enumerate(tstamp_image):
-            if tstamp_pose is None:
-                j = np.argmin(np.abs(tstamp_depth - t))
-                if np.abs(tstamp_depth[j] - t) < max_dt:
-                    associations.append((i, j))
+            associations = []
 
-            else:
-                j = np.argmin(np.abs(tstamp_depth - t))
-                k = np.argmin(np.abs(tstamp_pose - t))
+            # 限制处理范围为索引 300 到 600
+            start_idx = 0
+            end_idx = len(tstamp_image)
 
-                if (np.abs(tstamp_depth[j] - t) < max_dt) and (
-                    np.abs(tstamp_pose[k] - t) < max_dt
-                ):
-                    associations.append((i, j, k))
+            for i in range(start_idx, min(end_idx + 1, len(tstamp_image))):
+                t = tstamp_image[i]
 
-        return associations
+                if tstamp_pose is None:
+                    j = np.argmin(np.abs(tstamp_depth - t))
+                    if np.abs(tstamp_depth[j] - t) < max_dt:
+                        associations.append((i, j))
+                else:
+                    j = np.argmin(np.abs(tstamp_depth - t))
+                    k = np.argmin(np.abs(tstamp_pose - t))
+
+                    if (np.abs(tstamp_depth[j] - t) < max_dt) and (
+                        np.abs(tstamp_pose[k] - t) < max_dt
+                    ):
+                        associations.append((i, j, k))
+
+            return associations
 
     def load_poses(self, datapath, frame_rate=-1):
         if os.path.isfile(os.path.join(datapath, "groundtruth.txt")):
@@ -261,51 +300,23 @@ class MonocularDataset(BaseDataset):
                 "translation": np.zeros(3),
             },
         }
-
     def parse_plane_info_from_file(self, file_path):
-        planes = []
-        
-        # 定义一个阈值来判断法线是否接近水平或垂直
-        epsilon = 0.1  # 如果法线的分量接近 0，可以认为是水平或垂直
         with open(file_path, 'r') as f:
-            for line in f:
-                if not line.strip() or line.startswith("#"):
-                    continue  # 跳过空行
-                tokens = list(map(float, line.strip().split()))
-                plane = {
-                    'index': int(tokens[0]),
-                    'num_points': int(tokens[1]),
-                    'color': tuple(map(int, tokens[2:5])),
-                    'normal': tuple(tokens[5:8]),
-                    'center': tuple(tokens[8:11]),
-                    'mean': tuple(tokens[11:14]),
-                    'cov': {
-                        'sxx': tokens[14],
-                        'syy': tokens[15],
-                        'szz': tokens[16],
-                        'sxy': tokens[17],
-                        'syz': tokens[18],
-                        'sxz': tokens[19],
-                    }
-                }
-
-                # 判断是否接近水平或垂直
-                normal = plane['normal']
-                if abs(normal[2]) < epsilon:  # 接近水平平面
-                    # 如果接近水平，调整法线为完全水平（假设水平平面的法线为 (0, 0, 1)）
-                    plane['normal'] = (0.0, 0.0, 1.0)
-                elif abs(normal[0]) < epsilon:  # 接近垂直平面
-                    # 如果接近垂直，调整法线为完全垂直（假设垂直平面的法线为 (1, 0, 0) 或 (0, 1, 0)）
-                    # 这里假设垂直平面沿 X 轴调整，可以根据需求更改为沿 Y 轴
-                    plane['normal'] = (1.0, 0.0, 0.0)
-                elif abs(normal[1]) < epsilon:  # 也可以考虑沿 Y 轴的垂直平面
-                    plane['normal'] = (0.0, 1.0, 0.0)
-                else:
-                    continue
-                # 将修改后的平面添加到列表
-                planes.append(plane)
+            # 读取第一行的平面数量 N
+            N = int(f.readline().strip())
+            # 读取后续内容为二维标签矩阵
+            label_data = np.loadtxt(f, dtype=int)
         
-        return planes
+        # 构造无效像素掩码（不属于任何平面）
+        invalid_mask = (label_data == N)
+      
+        plane = {
+            'plane_count': int(N),
+            'label_data': label_data,
+            'invalid_mask': invalid_mask
+        }
+        
+        return plane
     def __getitem__(self, idx):
         color_path = self.color_paths[idx]
         pose = self.poses[idx]
@@ -328,12 +339,11 @@ class MonocularDataset(BaseDataset):
             .to(device=self.device, dtype=self.dtype)
         )
         pose = torch.from_numpy(pose).to(device=self.device)
-        plane_info = []
         if self.is_plane_info:
             plane_path = self.plane_paths[idx]
             plane_info = self.parse_plane_info_from_file(plane_path)
             # return image, depth, pose,plane_info
-        return image, depth, pose,plane_info
+        return image, depth, pose, plane_info
 
 
 class StereoDataset(BaseDataset):
@@ -472,7 +482,9 @@ class ReplicaDataset(MonocularDataset):
         self.num_imgs = parser.n_img
         self.color_paths = parser.color_paths
         self.depth_paths = parser.depth_paths
+        self.plane_paths = parser.plane_info
         self.poses = parser.poses
+        self.is_plane_info = parser.is_plane_info
 
 
 class EurocDataset(StereoDataset):

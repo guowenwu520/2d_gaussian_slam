@@ -1,19 +1,22 @@
 import random
 import time
 
+from matplotlib import pyplot as plt
+import numpy as np
+
 import torch
 import torch.multiprocessing as mp
 from tqdm import tqdm
 import open3d as o3d
-import numpy as np
-import torch.nn.functional as F
-from sklearn.neighbors import NearestNeighbors
-from gaussian_splatting.gaussian_renderer import render
+import torch.linalg as linalg
+from gaussian_splatting.gaussian_render import used2D
+from gaussian_splatting.gaussian_render import render
 from gaussian_splatting.utils.loss_utils import l1_loss, ssim
 from utils.logging_utils import Log
 from utils.multiprocessing_utils import clone_obj
 from utils.pose_utils import update_pose
 from utils.slam_utils import get_loss_mapping
+from utils.manhattan_voxelgrid import ManHattanVoxelGrid
 
 
 class BackEnd(mp.Process):
@@ -40,153 +43,8 @@ class BackEnd(mp.Process):
         self.current_window = []
         self.initialized = not self.monocular
         self.keyframe_optimizers = None
+        # self.manhattan_voxel=ManHattanVoxelGrid(0.01)
     
-  
-    def manhattan_position_loss_on_plane(self,positions, viewpoint, eps=0.01):
-            device = positions.device
-            plane_centers = torch.stack([torch.tensor(p['center'], device=device) for p in viewpoint.plane_info], dim=0)  # [P, 3]
-            plane_normals = torch.stack([torch.tensor(p['normal'], device=device) for p in viewpoint.plane_info], dim=0)  # [P, 3]
-
-            N = positions.shape[0]
-            P = plane_centers.shape[0]
-
-            points_expanded = positions.unsqueeze(1).expand(-1, P, -1)  # [N, P, 3]
-            centers_expanded = plane_centers.unsqueeze(0).expand(N, -1, -1)  # [N, P, 3]
-            normals_expanded = plane_normals.unsqueeze(0).expand(N, -1, -1)  # [N, P, 3]
-
-            vec = points_expanded - centers_expanded
-            dists = torch.abs((vec * normals_expanded).sum(dim=2))
-
-            min_dists, min_indices = dists.min(dim=1)
-            plane_mask = min_dists < eps
-
-            plane_positions = positions[plane_mask]
-            assigned_planes = min_indices[plane_mask]
-
-            if plane_positions.shape[0] == 0:
-                return torch.tensor(0.0, device=device)
-
-            # Now for each point, build local frame
-            losses = []
-            for idx, point in enumerate(plane_positions):
-                plane_idx = assigned_planes[idx]
-                normal = plane_normals[plane_idx]
-
-                # Find two vectors orthogonal to normal
-                tangent1 = torch.tensor([1.0, 0.0, 0.0], device=device)
-                if torch.allclose(normal, tangent1, atol=1e-2):
-                    tangent1 = torch.tensor([0.0, 1.0, 0.0], device=device)
-                tangent1 = tangent1 - (tangent1 @ normal) * normal
-                tangent1 = tangent1 / (tangent1.norm() + 1e-6)
-
-                tangent2 = torch.cross(normal, tangent1)
-
-                # Build local basis matrix
-                local_basis = torch.stack([tangent1, tangent2, normal], dim=1)  # [3,3]
-
-                local_coord = (point - plane_centers[plane_idx]) @ local_basis  # [3]
-
-                abs_pos = torch.abs(local_coord[:2])  # Only in-plane components
-                max_dim = abs_pos.max()
-                loss = torch.clamp(abs_pos / (max_dim + 1e-6), min=1.0) - 1.0
-                losses.append(loss.sum())
-
-            total_loss = torch.stack(losses).mean()
-            return total_loss
-
-    # def manhattan_position_loss_on_plane(self, positions, viewpoint, eps=0.01, vertical_threshold=0.1, horizontal_threshold=0.1):
-    #     device = positions.device
-    #     plane_centers = torch.stack([torch.tensor(p['center'], device=device) for p in viewpoint.plane_info], dim=0)  # [P, 3]
-    #     plane_normals = torch.stack([torch.tensor(p['normal'], device=device) for p in viewpoint.plane_info], dim=0)  # [P, 3]
-
-    #     N = positions.shape[0]
-    #     P = plane_centers.shape[0]
-
-    #     points_expanded = positions.unsqueeze(1).expand(-1, P, -1)  # [N, P, 3]
-    #     centers_expanded = plane_centers.unsqueeze(0).expand(N, -1, -1)  # [N, P, 3]
-    #     normals_expanded = plane_normals.unsqueeze(0).expand(N, -1, -1)  # [N, P, 3]
-
-    #     # Calculate distances from points to planes
-    #     vec = points_expanded - centers_expanded
-    #     dists = torch.abs((vec * normals_expanded).sum(dim=2))  # [N, P]
-
-    #     # Find the closest plane for each point and create a mask
-    #     min_dists, min_indices = dists.min(dim=1)
-    #     plane_mask = min_dists < eps
-
-    #     # Extract points that are close enough to planes
-    #     plane_positions = positions[plane_mask]
-    #     assigned_planes = min_indices[plane_mask]
-
-    #     # Return 0 if no points are near a plane
-    #     if plane_positions.shape[0] == 0:
-    #         return torch.tensor(0.0, device=device)
-
-    #     # 识别接近水平或垂直的平面，并纠正法线
-    #     for i in range(P):
-    #         normal = plane_normals[i]
-    #         if torch.abs(normal[2]) > 1 - horizontal_threshold:  # 接近水平平面
-    #             plane_normals[i] = torch.tensor([0.0, 0.0, 1.0], device=device)
-    #         elif torch.abs(normal[0]) > 1 - vertical_threshold:  # 接近垂直平面
-    #             plane_normals[i] = torch.tensor([1.0, 0.0, 0.0], device=device)
-    #         elif torch.abs(normal[1]) > 1 - vertical_threshold:  # 接近垂直平面
-    #             plane_normals[i] = torch.tensor([0.0, 1.0, 0.0], device=device)
-
-    #     # 重新计算点到平面的距离和归属
-    #     normals_expanded = plane_normals.unsqueeze(0).expand(N, -1, -1)  # 更新法线
-    #     vec = points_expanded - centers_expanded
-    #     dists = torch.abs((vec * normals_expanded).sum(dim=2))  # 重新计算点到平面的距离
-    #     min_dists, min_indices = dists.min(dim=1)
-    #     plane_mask = min_dists < eps
-
-    #     plane_positions = positions[plane_mask]
-    #     assigned_planes = min_indices[plane_mask]
-
-    #     if plane_positions.shape[0] == 0:
-    #         return torch.tensor(0.0, device=device)
-
-    #     # 计算每个点的投影位置，并对其进行修正
-    #     corrected_positions = []
-    #     for idx, point in enumerate(plane_positions):
-    #         plane_idx = assigned_planes[idx]
-    #         normal = plane_normals[plane_idx]
-    #         center = plane_centers[plane_idx]
-
-    #         # 计算点到平面的投影
-    #         vec_to_plane = point - center
-    #         projection = vec_to_plane - torch.dot(vec_to_plane, normal) * normal  # 投影到平面
-
-    #         corrected_positions.append(projection)
-
-    #     corrected_positions = torch.stack(corrected_positions)
-
-    #     # 对每个投影点重新计算损失
-    #     losses = []
-    #     for idx, point in enumerate(corrected_positions):
-    #         plane_idx = assigned_planes[idx]
-    #         normal = plane_normals[plane_idx]
-
-    #         # Find two tangent vectors orthogonal to the normal
-    #         tangent1 = torch.tensor([1.0, 0.0, 0.0], device=device)
-    #         if torch.allclose(normal, tangent1, atol=1e-2):
-    #             tangent1 = torch.tensor([0.0, 1.0, 0.0], device=device)
-            
-    #         tangent1 = tangent1 - (tangent1 @ normal) * normal
-    #         tangent1 = tangent1 / (tangent1.norm() + 1e-6)
-
-    #         tangent2 = torch.cross(normal, tangent1)
-
-    #         local_basis = torch.stack([tangent1, tangent2, normal], dim=1)  # [3,3]
-    #         local_coord = (point - plane_centers[plane_idx]) @ local_basis  # [3]
-
-    #         abs_pos = torch.abs(local_coord[:2])  # Only x, y components
-    #         max_dim = abs_pos.max()
-    #         loss = torch.clamp(abs_pos / (max_dim + 1e-6), min=1.0) - 1.0
-    #         losses.append(loss.sum())
-
-    #     total_loss = torch.stack(losses).mean()
-    #     return total_loss
-
 
     def set_hyperparams(self):
         self.save_results = self.config["Results"]["save_results"]
@@ -228,7 +86,7 @@ class BackEnd(mp.Process):
         self.keyframe_optimizers = None
 
         # remove all gaussians
-        # self.gaussians.prune_points(self.gaussians.unique_kfIDs >= 0)
+        self.gaussians.prune_points(self.gaussians.unique_kfIDs >= 0)
         # remove everything from the queues
         while not self.backend_queue.empty():
             self.backend_queue.get()
@@ -248,6 +106,7 @@ class BackEnd(mp.Process):
                 opacity,
                 n_touched,
                 D3D_points,
+                labes,
             ) = (
                 render_pkg["render"],
                 render_pkg["viewspace_points"],
@@ -257,10 +116,12 @@ class BackEnd(mp.Process):
                 render_pkg["opacity"],
                 render_pkg["n_touched"],
                 render_pkg["3d_points"],
+                render_pkg["labels"],
             )
             loss_init = get_loss_mapping(
                 self.config, image, depth, viewpoint, opacity, initialization=True
             )
+            +self.compute_projection_loss(D3D_points, labes)
             loss_init.backward()
 
             with torch.no_grad():
@@ -290,7 +151,159 @@ class BackEnd(mp.Process):
         self.occ_aware_visibility[cur_frame_idx] = (n_touched > 0).long()
         Log("Initialized map")
         return render_pkg
-    
+    # [0,4,6,3,5,2]
+    def visualize_point_cloud_with_labels(self, xyz, point_plane_labels, visible_labels=None):
+        # 固定颜色名 → RGB 值
+        fixed_color_map = {
+            "蓝色": (0.121, 0.466, 0.705),
+            "橙色": (1.000, 0.498, 0.054),
+            "绿色": (0.172, 0.627, 0.172),
+            "红色": (0.839, 0.153, 0.157),
+            "紫色": (0.580, 0.404, 0.741),
+            "棕色": (0.549, 0.337, 0.294),
+            "粉色": (0.890, 0.466, 0.760),
+            "灰色": (0.498, 0.498, 0.498),
+            "黄绿色": (0.737, 0.741, 0.133),
+            "青色": (0.090, 0.745, 0.811),
+            "深蓝": (0.0, 0.2, 0.4),
+            "浅橙": (1.0, 0.7, 0.4),
+            "浅绿": (0.6, 0.9, 0.6),
+            "深红": (0.6, 0.1, 0.1),
+            "浅紫": (0.75, 0.6, 0.9),
+            "浅棕": (0.8, 0.7, 0.5),
+            "浅粉": (1.0, 0.8, 0.9),
+            "深灰": (0.3, 0.3, 0.3),
+            "亮黄绿": (0.6, 0.8, 0.2),
+            "亮青": (0.4, 1.0, 1.0)
+        }
+
+        label_to_color_name = {
+            idx: name for idx, name in enumerate(fixed_color_map.keys())
+        }
+
+        # 初始化点云
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(xyz)
+
+        labels = point_plane_labels
+        colors = np.zeros((len(labels), 3))
+        gray = np.array([0.5, 0.5, 0.5])
+
+        unique_labels = np.unique(labels)
+        unique_labels = unique_labels[unique_labels != -1]
+
+        for label in unique_labels:
+            mask = labels == label
+            color_name = label_to_color_name.get(label, None)
+
+            if visible_labels is not None and label not in visible_labels:
+                colors[mask] = gray
+            elif color_name and color_name in fixed_color_map:
+                rgb = fixed_color_map[color_name]
+                colors[mask] = rgb
+                print(f"标签 {label} 的颜色是：{color_name}，RGB值为：{rgb}")
+            else:
+                colors[mask] = gray  # 超出范围或无定义
+
+        # 标签 -1 设置为灰色
+        colors[labels == -1] = gray
+        pcd.colors = o3d.utility.Vector3dVector(colors)
+
+        # 显示
+        o3d.visualization.draw_geometries([pcd])
+
+
+    def fit_plane(self, points):
+        """
+        最小二乘法拟合平面（使用 PyTorch 实现，支持 GPU）输入特定类别点集points（如果大于2000则会采样到2000） [N, 3]
+        返回: 平面中心点 + 法向量
+        计算步骤：1. 计算点集质心 2. 计算协方差矩阵 3. SVD 分解协方差矩阵 4. 法向量为最小奇异值对应的右奇异向量
+        """
+        centroid = points.mean(dim=0, keepdim=True)
+        centered = points - centroid # 对点集进行中心化，即每个点减去质心，因为拟合协方差矩阵需要以点云的质心为原点
+        cov = centered.T @ centered / (points.shape[0] - 1) # 计算协方差矩阵
+        _, _, V = torch.linalg.svd(cov) # SVD 分解协方差矩阵
+        normal = V[-1] # 提取V最后一行，最小奇异值对应的右奇异向量即为平面法向量
+        return centroid.squeeze(0), normal #(1,3)(3,)
+
+    def project_to_plane(self, points, plane_point, plane_normal):
+        """
+        将点投影到平面（使用 PyTorch 实现，支持 GPU）
+        点p,平面上一点p0,平面法向量n，计算向量v=p-p0，距离dist=v·n，投影点p'=p - dist*n
+        """
+        vec = points - plane_point  # [N, 3]
+        dist = torch.sum(vec * plane_normal, dim=-1, keepdim=True)  # [N, 1]元素乘后按 dim=-1 求和就是计算每个点的向量与法线的点积，得到每个点在法线方向上的有符号投影长度（即到平面的代数距离）
+        proj = points - dist * plane_normal  # [N, 3]
+        return proj, dist.squeeze(-1) # 每个输入点的投影坐标、该点到平面的距离
+
+
+    def compute_projection_loss(self, D3D_points, labels, plane_threshold=1e-2, manhattan_weight=0.1):
+        """
+        自动判断簇是否是平面：
+        - 如果簇点能较好拟合平面（平均距离 < plane_threshold） → 投影 loss
+        - 否则 → 法向量一致性 loss
+        - 并加上曼哈顿约束，强制点朝主轴对齐。
+        
+        Args:
+            D3D_points: torch.Tensor [N, 3] 点坐标 对应帧内的所有3D点
+            labels: torch.Tensor [N] 语义标签（int）
+            plane_threshold: float 判断是否为平面的误差阈值
+            manhattan_weight: float 权重系数，控制曼哈顿损失在总损失中的贡献
+        """
+        unique_labels = torch.unique(labels.detach())  # 获取所有独特标签
+        
+        total_loss = D3D_points.new_tensor(0.0)
+        total_count = 0
+
+        for label in unique_labels:
+            if label.item() == -1:
+                continue  # 跳过未分类点
+            
+            mask = labels == label
+            pts = D3D_points[mask]
+
+            if pts.shape[0] < 3:
+                continue  # 点数过少，无法拟合平面
+
+            # 大簇采样，避免内存溢出
+            if pts.shape[0] > 2000:
+                idx = torch.randperm(pts.shape[0], device=pts.device)[:2000]
+                pts = pts[idx]
+
+            # 计算主轴方向
+            pca_center = pts.mean(dim=0)
+            centered_pts = pts - pca_center
+            cov_matrix = torch.mm(centered_pts.T, centered_pts) / (pts.shape[0] - 1)
+            eigenvalues, eigenvectors = linalg.eigh(cov_matrix)
+            main_axis = eigenvectors[:, -1]  # 主轴是最大特征值对应的特征向量
+
+            # 尝试拟合平面
+            plane_pt, plane_normal = self.fit_plane(pts)
+            _, dists = self.project_to_plane(pts, plane_pt, plane_normal)
+            mean_dist = dists.mean()
+
+            if mean_dist < plane_threshold:
+                # 平面拟合损失
+                loss = (dists ** 2).mean()
+            else:
+                # 法向量一致性损失
+                normals = self.estimate_normals(pts)
+                mean_n = normals.mean(dim=0, keepdim=True)
+                loss = ((normals - mean_n) ** 2).sum(dim=1).mean()
+
+            # 计算曼哈顿约束损失
+            manhattan_dist = torch.abs(torch.mm(centered_pts, main_axis.unsqueeze(1)))  # 计算点到主轴的曼哈顿距离
+            manhattan_loss = manhattan_dist.mean()
+
+            # 总损失：平面拟合损失 + 法向量一致性损失 + 曼哈顿约束损失
+            total_loss += loss + manhattan_weight * manhattan_loss
+            total_count += 1
+
+        if total_count == 0:
+            return D3D_points.new_tensor(0.0)
+
+        return total_loss / total_count
+
 
     def map(self, current_window, prune=False, iters=1):
         if len(current_window) == 0:
@@ -333,6 +346,7 @@ class BackEnd(mp.Process):
                     opacity,
                     n_touched,
                     D3D_points,
+                    labes,
                 ) = (
                     render_pkg["render"],
                     render_pkg["viewspace_points"],
@@ -342,13 +356,15 @@ class BackEnd(mp.Process):
                     render_pkg["opacity"],
                     render_pkg["n_touched"],
                     render_pkg["3d_points"],
+                    render_pkg["labels"],
                 )
-
+                # print("D3D_points.shape: = = = ",cam_idx)
+                # self.visualize_point_cloud_with_labels(D3D_points,labes)
                 loss_mapping += get_loss_mapping(
                     self.config, image, depth, viewpoint, opacity
                 ) 
+                +self.compute_projection_loss(D3D_points, labes)
 
-             
                 # self.visualize_planar_classification(D3D_points, plane_mask)
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
                 visibility_filter_acm.append(visibility_filter)
@@ -368,7 +384,8 @@ class BackEnd(mp.Process):
                     depth,
                     opacity,
                     n_touched,
-                    D3D_points
+                    D3D_points,
+                    labes,
                 ) = (
                     render_pkg["render"],
                     render_pkg["viewspace_points"],
@@ -378,12 +395,12 @@ class BackEnd(mp.Process):
                     render_pkg["opacity"],
                     render_pkg["n_touched"],
                     render_pkg["3d_points"],
+                    render_pkg["labels"],
                 )
-
                 loss_mapping += get_loss_mapping(
                     self.config, image, depth, viewpoint, opacity
                 ) 
-
+                +self.compute_projection_loss(D3D_points, labes)
 
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
                 visibility_filter_acm.append(visibility_filter)
@@ -504,6 +521,20 @@ class BackEnd(mp.Process):
             loss = (1.0 - self.opt_params.lambda_dssim) * (
                 Ll1
             ) + self.opt_params.lambda_dssim * (1.0 - ssim(image, gt_image))
+
+            if (used2D):
+                 # regularization
+                lambda_normal = self.opt_params.lambda_normal if iteration > 7000 else 0.0
+                lambda_dist =  self.opt_params.lambda_dist if iteration > 3000 else 0.0
+
+                rend_dist = render_pkg["rend_dist"]
+                rend_normal  = render_pkg['rend_normal']
+                surf_normal = render_pkg['surf_normal']
+                normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
+                normal_loss = lambda_normal * (normal_error).mean()
+                dist_loss = lambda_dist * (rend_dist).mean()
+                loss+=normal_loss+dist_loss
+            
             loss.backward()
             with torch.no_grad():
                 self.gaussians.max_radii2D[visibility_filter] = torch.max(
@@ -528,6 +559,8 @@ class BackEnd(mp.Process):
         self.frontend_queue.put(msg)
 
     def run(self):
+        mapping_duration = 0.0
+        count = 0
         while True:
             if self.backend_queue.empty():
                 if self.pause:
@@ -567,6 +600,8 @@ class BackEnd(mp.Process):
                         cur_frame_idx, viewpoint, depth_map=depth_map, init=True
                     )
                     self.initialize_map(cur_frame_idx, viewpoint)
+                    # cpu_tensor_dict = self.gaussians.gather_gaussians_to_cpu()
+                    # self.manhattan_voxel.build(cpu_tensor_dict)
                     self.push_to_frontend("init")
 
                 elif data[0] == "keyframe":
@@ -632,12 +667,30 @@ class BackEnd(mp.Process):
                             }
                         )
                     self.keyframe_optimizers = torch.optim.Adam(opt_params)
-
+                    count+=1
+                    mapping_start_time = time.time()
                     self.map(self.current_window, iters=iter_per_kf)
                     self.map(self.current_window, prune=True)
+                    mapping_end_time = time.time()
+                    mapping_duration += mapping_end_time - mapping_start_time
+                    cpu_tensor_dict = self.gaussians.gather_gaussians_to_cpu()
+                    # self.manhattan_voxel.build(cpu_tensor_dict)
+                    # voxel_data = self.manhattan_voxel.get_all_voxel_data()
+                    # for key, entry_list in voxel_data.items():
+                    #     print(f"Voxel {key} contains {len(entry_list)} entries")
+                        # for i, entry in enumerate(entry_list):
+                        #     print(f"  Entry {i}: xyz={entry['xyz']}, opacity={entry['opacity']}")
                     self.push_to_frontend("keyframe")
                 else:
                     raise Exception("Unprocessed data", data)
+        maping_iters = 150*count
+        # === 打印汇总统计 ===
+        avg_tracking_iter = mapping_duration/ maping_iters * 1000  # ms
+        avg_tracking_frame = mapping_duration/ count  # s
+
+        print(f"\n--- Performance Summary ---")
+        print(f"Average Mapping/Iteration Time: {avg_tracking_iter:.6f} ms")
+        print(f"Average Mapping/Frame Time:     {avg_tracking_frame:.6f} s")
         while not self.backend_queue.empty():
             self.backend_queue.get()
         while not self.frontend_queue.empty():
