@@ -539,6 +539,13 @@ class SLAM_GUI:
         return current_cam
 
     def rasterise(self, current_cam):
+        if self.gaussian_cur is not None and self.gaussian_cur.get_xyz is not None:
+                # 获取 get_xyz 的值
+                xyz = self.gaussian_cur.get_xyz
+                
+                # 检查 get_xyz 是否为空（维度为0），即判断其形状
+                if xyz.shape[0] == 0:  # 如果第一个维度为0，表示没有有效数据，返回
+                    return
         if (
             self.time_shader_chbox.checked
             and self.gaussian_cur is not None
@@ -554,7 +561,7 @@ class SLAM_GUI:
             # # 扩展颜色到与 kf_ids 数量匹配（假设每个高斯点一个颜色）
             # # 假设 kf_ids 形状为 [N]（N 为高斯点数量），则扩展为 [N, 3]
             # rgb_fixed = fixed_color.repeat(kf_ids.shape[0], 1) 
-
+             
             alpha = 0.1
             self.gaussian_cur.get_features = alpha * features + (
                 1 - alpha

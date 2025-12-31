@@ -160,7 +160,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const torch::Tensor& imageBuffer,
 	const bool debug) 
 {
-
   CHECK_INPUT(background);
   CHECK_INPUT(means3D);
   CHECK_INPUT(radii);

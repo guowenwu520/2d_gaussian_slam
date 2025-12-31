@@ -55,7 +55,14 @@ class _RasterizeGaussians(torch.autograd.Function):
         cov3Ds_precomp,
         raster_settings,
     ):
-
+        print(f"forward grad_means3D shape: {means3D.shape}")
+        print(f"forward grad_means2D shape: {means2D.shape}")
+        print(f"forward grad_sh shape: {sh.shape}")
+        print(f"forward grad_colors_precomp shape: {colors_precomp.shape}")
+        print(f"forward grad_opacities shape: {opacities.shape}")
+        print(f"forward grad_scales shape: {scales.shape}")
+        print(f"forward grad_rotations shape: {rotations.shape}")
+        print(f"forward grad_cov3Ds_precomp shape: {cov3Ds_precomp.shape}")
         # Restructure arguments the way that the C++ lib expects them
         args = (
             raster_settings.bg, 
@@ -95,6 +102,10 @@ class _RasterizeGaussians(torch.autograd.Function):
         ctx.raster_settings = raster_settings
         ctx.num_rendered = num_rendered
         ctx.save_for_backward(colors_precomp, means3D, scales, rotations, cov3Ds_precomp, radii, sh, geomBuffer, binningBuffer, imgBuffer)
+        print(f"color shape: {color.shape}")
+        print(f"radii shape: {radii.shape}")
+        print(f"depth shape: {depth.shape}")
+        print(f"touched shape: {n_touched.shape}")
         return color, radii, depth,n_touched
 
     @staticmethod
@@ -144,7 +155,14 @@ class _RasterizeGaussians(torch.autograd.Function):
                 raise ex
         else:
              grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations = _C.rasterize_gaussians_backward(*args)
-
+        print(f"grad_means3D shape: {grad_means3D.shape}")
+        print(f"grad_means2D shape: {grad_means2D.shape}")
+        print(f"grad_sh shape: {grad_sh.shape}")
+        print(f"grad_colors_precomp shape: {grad_colors_precomp.shape}")
+        print(f"grad_opacities shape: {grad_opacities.shape}")
+        print(f"grad_scales shape: {grad_scales.shape}")
+        print(f"grad_rotations shape: {grad_rotations.shape}")
+        print(f"grad_cov3Ds_precomp shape: {grad_cov3Ds_precomp.shape}")
         grads = (
             grad_means3D,
             grad_means2D,

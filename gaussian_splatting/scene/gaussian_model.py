@@ -39,7 +39,7 @@ class GaussianModel:
     def __init__(self, sh_degree: int, config=None):
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree
-
+        self.use2D = False
         self._xyz = torch.empty(0, device="cuda")
         self._features_dc = torch.empty(0, device="cuda")
         self._features_rest = torch.empty(0, device="cuda")
@@ -97,9 +97,9 @@ class GaussianModel:
 
     @property
     def get_rotation(self):
-        print(f"rotation {self._rotation.shape}")
-        print(torch.isnan(self._rotation).sum())  # 检查是否有 NaN 值
-        print(torch.isinf(self._rotation).sum())  # 检查是否有 Inf 值
+        # print(f"rotation {self._rotation.shape}")
+        # print(torch.isnan(self._rotation).sum())  # 检查是否有 NaN 值
+        # print(torch.isinf(self._rotation).sum())  # 检查是否有 Inf 值
         if self._rotation.size(0) == 0 or self._rotation.size(1) == 0:
             print("Error: Rotation tensor has a dimension of 0.")
             default_rotation = torch.zeros(7926, 4)  # 或者其他合适的默认值
@@ -543,8 +543,14 @@ class GaussianModel:
                 * point_size
             )
             scales = torch.log(torch.sqrt(dist2))[..., None]
-            if not self.isotropic:
-                scales = scales.repeat(1, 3)
+            if self.use2D:
+                scales = scales.repeat(1, 2)
+                print("设置为2为 ",scales.shape)
+            else:    
+                if not self.isotropic:
+                    scales = scales.repeat(1, 3)
+                print("设置为3为 ",scales.shape)
+                
 
             rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
             rots[:, 0] = 1
@@ -1064,7 +1070,11 @@ class GaussianModel:
         )
 
         stds = self.get_scaling[selected_pts_mask].repeat(N, 1)
-        means = torch.zeros((stds.size(0), 3), device="cuda")
+        if self.use2D:
+            stds = torch.cat([stds, 0 * torch.ones_like(stds[:,:1])], dim=-1)
+            means = torch.zeros_like(stds)
+        else:    
+           means = torch.zeros((stds.size(0), 3), device="cuda")
         samples = torch.normal(mean=means, std=stds)
         rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N, 1, 1)
         new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[

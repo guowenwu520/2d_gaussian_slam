@@ -9,7 +9,7 @@ import torch.multiprocessing as mp
 from tqdm import tqdm
 import open3d as o3d
 import torch.linalg as linalg
-from gaussian_splatting.gaussian_render import used2D
+from gaussian_splatting.gaussian_render import use2D
 from gaussian_splatting.gaussian_render import render
 from gaussian_splatting.utils.loss_utils import l1_loss, ssim
 from utils.logging_utils import Log
@@ -522,7 +522,7 @@ class BackEnd(mp.Process):
                 Ll1
             ) + self.opt_params.lambda_dssim * (1.0 - ssim(image, gt_image))
 
-            if (used2D):
+            if (use2D):
                  # regularization
                 lambda_normal = self.opt_params.lambda_normal if iteration > 7000 else 0.0
                 lambda_dist =  self.opt_params.lambda_dist if iteration > 3000 else 0.0
@@ -579,6 +579,7 @@ class BackEnd(mp.Process):
                     self.push_to_frontend()
             else:
                 data = self.backend_queue.get()
+                print("back 收到指令 ",data[0])
                 if data[0] == "stop":
                     break
                 elif data[0] == "pause":
@@ -668,6 +669,8 @@ class BackEnd(mp.Process):
                         )
                     self.keyframe_optimizers = torch.optim.Adam(opt_params)
                     count+=1
+
+                    print(f"back cout   {count}")
                     mapping_start_time = time.time()
                     self.map(self.current_window, iters=iter_per_kf)
                     self.map(self.current_window, prune=True)
@@ -683,6 +686,7 @@ class BackEnd(mp.Process):
                     self.push_to_frontend("keyframe")
                 else:
                     raise Exception("Unprocessed data", data)
+        if count==0: count =1        
         maping_iters = 150*count
         # === 打印汇总统计 ===
         avg_tracking_iter = mapping_duration/ maping_iters * 1000  # ms

@@ -6,7 +6,7 @@ diff_rasterization/diff_rast.egg-info
 **.egg-info
 **.so
 diff_rasterization/dist
-
+ablation_results
 cameras.json
 *.ply
 *.mp4

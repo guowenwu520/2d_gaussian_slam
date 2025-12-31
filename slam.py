@@ -107,7 +107,7 @@ class SLAM:
         if self.use_gui:
             gui_process = mp.Process(target=slam_gui.run, args=(self.params_gui,))
             gui_process.start()
-            time.sleep(5)
+            time.sleep(15)
 
         backend_process.start()
         self.frontend.run()

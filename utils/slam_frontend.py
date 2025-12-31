@@ -216,6 +216,9 @@ class FrontEnd(mp.Process):
         dist_check = dist > kf_translation * self.median_depth
         dist_check2 = dist > kf_min_translation * self.median_depth
 
+        # print(f"dist: {dist}, kf_translation: {kf_translation}, kf_min_translation: {kf_min_translation}")
+        # print(f"dist_check: {dist_check}, dist_check2: {dist_check2}")
+
         union = torch.logical_or(
             cur_frame_visibility_filter, occ_aware_visibility[last_keyframe_idx]
         ).count_nonzero()
@@ -223,6 +226,7 @@ class FrontEnd(mp.Process):
             cur_frame_visibility_filter, occ_aware_visibility[last_keyframe_idx]
         ).count_nonzero()
         point_ratio_2 = intersection / union
+        # print(f"union: {union}, intersection: {intersection}, point_ratio_2: {point_ratio_2}, kf_overlap: {kf_overlap}")
         return (point_ratio_2 < kf_overlap and dist_check2) or dist_check
 
     def add_to_window(
@@ -394,6 +398,7 @@ class FrontEnd(mp.Process):
                 # Tracking
                 render_pkg = self.tracking(cur_frame_idx, viewpoint)
                 count+=1
+                print(f"front cout   {count}")
                 track_end_time = time.time()
                 track_duration += track_end_time - track_start_time
                 current_window_dict = {}
@@ -417,6 +422,11 @@ class FrontEnd(mp.Process):
                 last_keyframe_idx = self.current_window[0]
                 check_time = (cur_frame_idx - last_keyframe_idx) >= self.kf_interval
                 curr_visibility = (render_pkg["n_touched"] > 0).long()
+                # num_ones = torch.sum(curr_visibility).item()  # 计算1的个数
+                # num_zeros = curr_visibility.numel() - num_ones  # 计算0的个数
+
+                # print(f"Number of 1's (visible): {num_ones}")
+                # print(f"Number of 0's (not visible): {num_zeros}")
                 create_kf = self.is_keyframe(
                     cur_frame_idx,
                     last_keyframe_idx,
@@ -485,6 +495,8 @@ class FrontEnd(mp.Process):
                     time.sleep(max(0.01, 1.0 / 3.0 - duration / 1000))
             else:
                 data = self.frontend_queue.get()
+
+                print("fornt 收到指令 ",data[0])
                 if data[0] == "sync_backend":
                     self.sync_backend(data)
 
@@ -500,6 +512,7 @@ class FrontEnd(mp.Process):
                     Log("Frontend Stopped.")
                     break
         
+        if count==0: count =1        
         tracking_iters = 100*count
         # === 打印汇总统计 ===
         avg_tracking_iter = track_duration/ tracking_iters * 1000  # ms

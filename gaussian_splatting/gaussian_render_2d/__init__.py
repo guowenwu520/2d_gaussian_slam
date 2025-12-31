@@ -105,7 +105,7 @@ def render(
     else:
         colors_precomp = override_color
     if mask is not None:
-        print(f"mask means3D: {means3D[mask].shape}")
+        # print(f"mask means3D: {means3D[mask].shape}")
         rendered_image, radii, allmap = rasterizer(
             means3D = means3D[mask],
             means2D = means2D[mask],
@@ -117,7 +117,7 @@ def render(
             cov3D_precomp = cov3D_precomp[mask]
         )
     else:
-        print(f" means3D: {means3D.shape}")
+        # print(f" means3D: {means3D.shape}")
         rendered_image, radii, allmap, n_touched  = rasterizer(
             means3D = means3D,
             means2D = means2D,
@@ -168,10 +168,10 @@ def render(
     surf_normal = surf_normal.permute(2,0,1)
     # remember to multiply with accum_alpha since render_normal is unnormalized.
     surf_normal = surf_normal * (render_alpha).detach()
-    print(f"n_touched: {n_touched.shape}")
-    print(f"opacity: {render_alpha.shape}")
-    print(f"depth: {surf_depth.shape}")
-    print(f"radii: {radii.shape}")
+    # print(f"n_touched: {n_touched.shape}")
+    # print(f"opacity: {render_alpha.shape}")
+    # print(f"depth: {surf_depth.shape}")
+    # print(f"radii: {radii.shape}")
 
     rets.update({
             'opacity': render_alpha,

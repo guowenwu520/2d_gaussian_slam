@@ -175,10 +175,10 @@ def render(
             theta=viewpoint_camera.cam_rot_delta,
             rho=viewpoint_camera.cam_trans_delta,
         )
-    print(f"n_touched: {n_touched.shape}")
-    print(f"opacity: {opacity.shape}")
-    print(f"depth: {depth.shape}")
-    print(f"radii: {radii.shape}")
+    # print(f"n_touched: {n_touched.shape}")
+    # print(f"opacity: {opacity.shape}")
+    # print(f"depth: {depth.shape}")
+    # print(f"radii: {radii.shape}")
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
     return {
